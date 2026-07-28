@@ -197,7 +197,16 @@ pub fn get_effective_flat_fee_config(env: &Env) -> Option<FlatFeeConfig> {
 
 fn get_flat_fee_config_from_dao(env: &Env) -> Option<FlatFeeConfig> {
     let dao = get_dao(env)?;
-    let func = Symbol::new(env, "get_attestation_flat_fee_config");
+    // Must match ProtocolDao::get_attestation_fee_config exactly (Soroban
+    // resolves cross-contract calls by symbol name; there is no compile-time
+    // check across these two independently-deployed contract crates). This
+    // previously read "get_attestation_flat_fee_config", a function that has
+    // never existed on ProtocolDao — every flat-fee DAO-override read would
+    // fail once a DAO address was configured via `set_flat_fee_dao`. No
+    // existing test caught this because none of them exercised the flat-fee
+    // DAO-override path against a real deployed DAO contract (only the
+    // dynamic-fee DAO-override path, which already used the correct symbol).
+    let func = Symbol::new(env, "get_attestation_fee_config");
     let args = Vec::<Val>::new(env);
     let opt: Option<(Address, Address, i128, bool)> = env.invoke_contract(&dao, &func, args);
     opt.map(|(token, collector, amount, enabled)| FlatFeeConfig {
