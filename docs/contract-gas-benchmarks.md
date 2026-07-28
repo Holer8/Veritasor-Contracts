@@ -80,6 +80,38 @@ Based on Soroban's resource limits and operation complexity:
 | `revoke_role` (keep in holders) | < 150,000 | < 4,000 | Role revoked, address retains other roles |
 | `revoke_role` (remove from holders) | < 250,000 | < 7,000 | Role revoked, address removed from holders |
 | `has_role` | < 80,000 | < 2,000 | Access control check |
+| `is_paused` (cold) | < 80,000 | < 2,000 | Paused key absent — `unwrap_or(false)` default |
+| `is_paused` (hot) | < 80,000 | < 2,000 | Paused key present in instance storage |
+
+### Cold vs Warm Storage: is_paused
+
+`is_paused` is a read-only query that checks a single boolean flag in instance
+storage.  It is called on every hot path (submit_attestation,
+verify_attestation, migrate_attestation, etc.) before any state mutation is
+allowed, so its cost compounds across all protocol invocations.
+
+| Scenario | CPU Instructions | Memory Bytes | Notes |
+|----------|-----------------|--------------|-------|
+| `is_paused` (cold) | < 80,000 | < 2,000 | Paused key absent — read returns `false` via `unwrap_or` |
+| `is_paused` (hot) | < 80,000 | < 2,000 | Paused key present in instance storage |
+
+**Cold path**: On a freshly deployed contract — or after a long idle period
+where instance storage was not touched — the `Paused` key does not exist.
+`is_paused` calls `env.storage().instance().get(…).unwrap_or(false)`, paying
+the full ledger-entry read cost.
+
+**Hot path**: After the first `pause()` or `unpause()` call the key is written
+and remains resident in instance storage.  Subsequent reads are cheaper because
+the entry is already in the ledger cache.
+
+**Fast-path budget**: Both scenarios must stay under **< 80,000 CPU
+instructions / < 2,000 memory bytes** — the same ceiling as `has_role`, since
+both are single instance-storage boolean reads.  This ensures `is_paused`
+contributes negligible overhead to every call that uses it as a gate.
+
+The comparison report (`bench_is_paused_cold_hot_comparison`) emits a
+JSON-formatted summary for automated gas planning pipelines and prints the
+cold → hot savings percentage.
 
 ### Cold vs Warm Storage: verify_attestation
 
@@ -441,6 +473,8 @@ In addition to benchmarks, dedicated regression tests enforce hard cost ceilings
 | `regression_grant_role_threshold` | grant_role | < 375,000 | < 10,500 |
 | `regression_is_revoked_active_threshold` | is_revoked (active) | < 300,000 | < 7,500 |
 | `regression_is_revoked_after_revoke_threshold` | is_revoked (revoked) | < 375,000 | < 9,000 |
+| `regression_is_paused_cold_threshold` | is_paused (cold) | < 120,000 | < 3,000 |
+| `regression_is_paused_hot_threshold` | is_paused (hot) | < 120,000 | < 3,000 |
 
 ### Running Regression Tests
 ```bash
@@ -548,6 +582,15 @@ O(N) → O(N²) regressions across the three batch sizes.
 ---
 
 ## Changelog
+
+### 2026-07-28
+
+- Added `is_paused` hot/cold benchmark pair (`bench_is_paused_cold`, `bench_is_paused_hot`)
+- Added `bench_is_paused_cold_hot_comparison` — structured JSON report for automated pipelines
+- Added regression guards: `regression_is_paused_cold_threshold`, `regression_is_paused_hot_threshold`
+- Both paths emit CSV rows via `append_to_csv` to `target/gas_benchmarks.csv`
+- Fast-path budget confirmed: `< 80 000 CPU / < 2 000 memory` (same as `has_role`; single instance-storage boolean read)
+- Security note: `is_paused` is called on every hot path; its read cost compounds across all protocol invocations
 
 ### 2026-07-28
 
