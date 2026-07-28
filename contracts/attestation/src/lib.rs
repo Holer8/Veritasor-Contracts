@@ -2529,6 +2529,8 @@ mod batch_auth_dedup_test;
 #[cfg(all(test, feature = "full-tests"))]
 mod batch_submission_test;
 #[cfg(all(test, feature = "full-tests"))]
+mod business_count_role_parity_test;
+#[cfg(all(test, feature = "full-tests"))]
 mod dao_override_test;
 #[cfg(all(test, feature = "full-tests"))]
 mod dispute_test;
