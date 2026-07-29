@@ -42,6 +42,7 @@
 //! | `BusinessApproved`          | `biz_apr`      | `business`        |
 //! | `BusinessSuspended`         | `biz_sus`      | `business`        |
 //! | `BusinessReactivated`       | `biz_rea`      | `business`        |
+//! | `EpochAdvanced`             | `ep_adv`       | *(none)*          |
 //! | `EpochCheckpoint`           | `ep_ckpt`      | *(none)*          |
 //!
 //! ## Indexer Compatibility Contract
@@ -143,6 +144,8 @@ pub const TOPIC_BIZ_SUSPENDED: Symbol = symbol_short!("biz_sus");
 pub const TOPIC_BIZ_REACTIVATE: Symbol = symbol_short!("biz_rea");
 /// Topic: proof hash updated
 pub const TOPIC_PROOF_HASH_UPDATED: Symbol = symbol_short!("ph_upd");
+/// Topic: fee bucket epoch advanced
+pub const TOPIC_EPOCH_ADVANCED: Symbol = symbol_short!("ep_adv");
 /// Topic: revocation proposed (grace window started)
 pub const TOPIC_REVOCATION_PROPOSED: Symbol = symbol_short!("rv_prop");
 /// Topic: revocation proposal cancelled (appeal succeeded)
@@ -639,6 +642,24 @@ pub struct BusinessReactivatedEvent {
     pub business: Address,
     /// Admin address that performed the reactivation.
     pub reactivated_by: Address,
+}
+
+/// Normalized payload for `EpochAdvanced` events.
+///
+/// Emitted once per fee-bucket window rollover. Indexers use `epoch` as a
+/// monotonic cursor to align analytics windows with on-chain state.
+///
+/// ## Security
+/// - `epoch` is strictly monotonic: it only ever increases.
+/// - `at_ts` is the ledger timestamp at the moment of the rollover.
+/// - Multiple rollovers in a single transaction each produce a separate event.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EpochAdvancedEvent {
+    /// New epoch number (1-based, monotonically non-decreasing).
+    pub epoch: u64,
+    /// Ledger timestamp when the epoch was advanced.
+    pub at_ts: u64,
 }
 
 /// Normalized payload for `ProofHashUpdated` events.
@@ -1551,6 +1572,11 @@ pub fn emit_proof_hash_updated(
         .publish((TOPIC_PROOF_HASH_UPDATED, business.clone()), event);
 }
 
+/// Emit an `EpochAdvanced` event.
+///
+/// Call this after the fee bucket window has rolled over and the epoch counter
+/// has been incremented. Each rollover window produces one event, so multiple
+/// rollovers in a single transaction emit multiple events.
 // ── Time-locked revocation (grace-window appeal) ──────────────────
 
 /// Normalized payload for `RevocationProposed` events.
@@ -1831,14 +1857,18 @@ pub fn emit_epoch_checkpoint(
 /// # Arguments
 ///
 /// * `env`   – Soroban execution environment.
+/// * `epoch` – The new epoch number (monotonically non-decreasing).
 /// * `epoch` – New epoch value.
 /// * `at_ts` – Ledger timestamp at emission.
 ///
 /// # Events
 ///
 /// Publishes `(ep_adv,)` → `EpochAdvancedEvent`.
-pub fn emit_epoch_advanced(env: &Env, epoch: u64, at_ts: u64) {
-    let event = EpochAdvancedEvent { epoch, at_ts };
+pub fn emit_epoch_advanced(env: &Env, epoch: u64) {
+    let event = EpochAdvancedEvent {
+        epoch,
+        at_ts: env.ledger().timestamp(),
+    };
     env.events().publish((TOPIC_EPOCH_ADVANCED,), event);
 }
 
