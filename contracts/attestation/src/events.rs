@@ -166,8 +166,8 @@ pub const TOPIC_APPROVAL_REVOKED: Symbol = symbol_short!("appr_rv");
 pub const TOPIC_EPOCH_CHECKPOINT: Symbol = symbol_short!("ep_ckpt");
 /// Topic: backfill checkpoint emitted every N submissions (global counter)
 pub const TOPIC_BACKFILL_CHECKPOINT: Symbol = symbol_short!("bkf_chk");
-/// Topic: dispute automatically rolled back after deadline exceeded
-pub const TOPIC_DISPUTE_ROLLED_BACK: Symbol = symbol_short!("dsp_rb");
+/// Topic: delegated-submission permit cancelled (nonce burned)
+pub const TOPIC_PERMIT_CANCELLED: Symbol = symbol_short!("perm_canc");
 
 // ════════════════════════════════════════════════════════════════════
 //  Normalized Event Data Structures
@@ -668,6 +668,20 @@ pub struct BusinessReactivatedEvent {
     pub reactivated_by: Address,
 }
 
+/// Normalized payload for `PermitCancelled` events.
+///
+/// Emitted when a delegated-submission permit is cancelled and its nonce
+/// is burned, permanently invalidating any pre-signed permit using that
+/// nonce value for the business on `NONCE_CHANNEL_PERMIT`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PermitCancelledEvent {
+    /// Business whose permit was cancelled.
+    pub business: Address,
+    /// Nonce value that was burned.
+    pub nonce: u64,
+}
+
 /// Normalized payload for `EpochAdvanced` events.
 ///
 /// Emitted once per fee-bucket window rollover. Indexers use `epoch` as a
@@ -949,38 +963,28 @@ pub fn emit_attestation_cleaned_up(env: &Env, business: &Address, period: &Strin
         .publish((TOPIC_ATTESTATION_CLEANED_UP, business.clone()), event);
 }
 
-/// Emit a `DisputeRolledBack` event.
+/// Emit a `PermitCancelled` event.
 ///
-/// Call this after a dispute has been automatically rolled back due to
-/// exceeding the resolution deadline.
+/// Call this after a delegated-submission permit has been cancelled and its
+/// nonce burned on `NONCE_CHANNEL_PERMIT`.  Off-chain indexers can use the
+/// `business` secondary topic to monitor cancellations per business.
 ///
 /// # Arguments
 ///
-/// * `env`              – Soroban execution environment.
-/// * `dispute_id`       – Unique identifier of the rolled-back dispute.
-/// * `business`         – Business address associated with the dispute.
-/// * `period`           – Period identifier of the disputed attestation.
-/// * `deadline_seconds` – The deadline threshold that was exceeded.
+/// * `env`      – Soroban execution environment.
+/// * `business` – Business whose permit was cancelled.
+/// * `nonce`    – Nonce value that was burned.
 ///
 /// # Events
 ///
-/// Publishes `(dsp_rb, business)` → `DisputeRolledBackEvent`.
-pub fn emit_dispute_rolled_back(
-    env: &Env,
-    dispute_id: u64,
-    business: &Address,
-    period: &String,
-    deadline_seconds: u64,
-) {
-    let event = DisputeRolledBackEvent {
-        dispute_id,
+/// Publishes `(perm_canc, business)` → `PermitCancelledEvent`.
+pub fn emit_permit_cancelled(env: &Env, business: &Address, nonce: u64) {
+    let event = PermitCancelledEvent {
         business: business.clone(),
-        period: period.clone(),
-        rolled_back_at: env.ledger().timestamp(),
-        deadline_seconds,
+        nonce,
     };
     env.events()
-        .publish((TOPIC_DISPUTE_ROLLED_BACK, business.clone()), event);
+        .publish((TOPIC_PERMIT_CANCELLED, business.clone()), event);
 }
 
 /// Emit a `SlashTriggered` event.
