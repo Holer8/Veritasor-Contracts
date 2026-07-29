@@ -1991,120 +1991,16 @@ pub fn emit_backfill_checkpoint(
     env.events().publish((TOPIC_BACKFILL_CHECKPOINT,), event);
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  Attestor Staking Contract Time-Lock Events
-// ════════════════════════════════════════════════════════════════════
-
-/// Normalized payload for `StakingContractProposed` events.
-///
-/// Emitted when an admin proposes a new attestor staking contract address.
-/// The change does not take effect until `commit_staking_contract` is
-/// called at least `FEE_TIMELOCK_SECONDS` (86 400 s / 24 h) later.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StakingContractProposedEvent {
-    /// Proposed new staking contract address.
-    pub new_contract: Address,
-    /// Address that proposed the change.
-    pub proposed_by: Address,
-    /// Ledger timestamp (Unix seconds) after which the change may be committed.
-    pub effective_at: u64,
+// DAO Rotation Events
+pub fn emit_dao_rotation_proposed(env: &Env, old_dao: &Address, new_dao: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "dao_rotation_proposed"), old_dao.clone()),
+        new_dao.clone(),
+    );
 }
-
-/// Normalized payload for `StakingContractCommitted` events.
-///
-/// Emitted when the proposed staking contract address is applied after the
-/// 24-hour timelock has elapsed.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StakingContractCommittedEvent {
-    /// Staking contract address now in effect.
-    pub new_contract: Address,
-    /// Address that committed the change.
-    pub committed_by: Address,
-}
-
-/// Normalized payload for `StakingContractCancelled` events.
-///
-/// Emitted when a pending staking-contract proposal is cancelled before
-/// the timelock expires.
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct StakingContractCancelledEvent {
-    /// Proposed address that was cancelled.
-    pub cancelled_contract: Address,
-    /// Address that cancelled the proposal.
-    pub cancelled_by: Address,
-}
-
-/// Emit a `StakingContractProposed` event.
-///
-/// # Arguments
-///
-/// * `env`          – Soroban execution environment.
-/// * `new_contract` – Proposed staking contract address.
-/// * `proposed_by`  – Admin that created the proposal.
-/// * `effective_at` – Earliest timestamp at which `commit_staking_contract` may be called.
-///
-/// # Events
-///
-/// Publishes `(sk_prop,)` → `StakingContractProposedEvent`.
-pub fn emit_staking_contract_proposed(
-    env: &Env,
-    new_contract: &Address,
-    proposed_by: &Address,
-    effective_at: u64,
-) {
-    let event = StakingContractProposedEvent {
-        new_contract: new_contract.clone(),
-        proposed_by: proposed_by.clone(),
-        effective_at,
-    };
-    env.events().publish((TOPIC_STAKING_CONTRACT_PROPOSED,), event);
-}
-
-/// Emit a `StakingContractCommitted` event.
-///
-/// # Arguments
-///
-/// * `env`          – Soroban execution environment.
-/// * `new_contract` – Staking contract address now in effect.
-/// * `committed_by` – Admin that committed the change.
-///
-/// # Events
-///
-/// Publishes `(sk_com,)` → `StakingContractCommittedEvent`.
-pub fn emit_staking_contract_committed(
-    env: &Env,
-    new_contract: &Address,
-    committed_by: &Address,
-) {
-    let event = StakingContractCommittedEvent {
-        new_contract: new_contract.clone(),
-        committed_by: committed_by.clone(),
-    };
-    env.events().publish((TOPIC_STAKING_CONTRACT_COMMITTED,), event);
-}
-
-/// Emit a `StakingContractCancelled` event.
-///
-/// # Arguments
-///
-/// * `env`               – Soroban execution environment.
-/// * `cancelled_contract` – The proposed address that was cancelled.
-/// * `cancelled_by`      – Admin that cancelled the proposal.
-///
-/// # Events
-///
-/// Publishes `(sk_canc,)` → `StakingContractCancelledEvent`.
-pub fn emit_staking_contract_cancelled(
-    env: &Env,
-    cancelled_contract: &Address,
-    cancelled_by: &Address,
-) {
-    let event = StakingContractCancelledEvent {
-        cancelled_contract: cancelled_contract.clone(),
-        cancelled_by: cancelled_by.clone(),
-    };
-    env.events().publish((TOPIC_STAKING_CONTRACT_CANCELLED,), event);
+pub fn emit_dao_rotation_accepted(env: &Env, old_dao: &Address, new_dao: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "dao_rotation_accepted"), old_dao.clone()),
+        new_dao.clone(),
+    );
 }
