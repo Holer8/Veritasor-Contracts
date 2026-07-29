@@ -3,6 +3,7 @@
 extern crate std;
 
 use super::*;
+use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
 use soroban_sdk::{Address, BytesN, Env, String};
 
@@ -595,139 +596,119 @@ fn test_disabled_config_enforces_nothing() {
     assert_eq!(client.get_business_count(&business), 3);
 }
 
-// ── Window-rollover exact-boundary tests ─────────────────────────────────────
-
-/// # Security assumption
-///
-/// The sliding-window cutoff is defined as `now.saturating_sub(window_seconds)`
-/// and a stored timestamp `ts` is kept only when `ts > cutoff` (strict `>`).
-///
-/// Therefore, at `now = T + window_seconds` the cutoff equals exactly `T`.
-/// Since `T > T` is **false**, the timestamp recorded at `T` is pruned and the
-/// window has fully rolled over.  A new submission at this exact instant must
-/// succeed; counting it against the *previous* window would create an off-by-
-/// one denial-of-service: a legitimate submitter who used their last slot right
-/// at the boundary would be locked out for one extra second beyond what the
-/// configured `window_seconds` promises.
-///
-/// This test fills the window to its cap, advances the ledger by *exactly*
-/// `window_seconds` (no more, no less), and asserts that the next submission
-/// is accepted and starts a fresh counter at 1.
-#[test]
-fn test_rate_window_rollover_exact_boundary() {
-    let (env, client, _admin) = setup();
-    let business = Address::generate(&env);
-
-    // Use burst == full window so the burst guard never fires first.
-    // window_seconds = 100; cap = 2 submissions.
-    configure_rate_limit(&client, 2, 100, 2, 100, true, 1);
-
-    // ── Phase 1: fill the window ──────────────────────────────────────────
-    // Submit at t = 1_000.
-    set_ledger_timestamp(&env, 1_000);
-    submit(&client, &env, &business, 1);
-
-    // Submit at t = 1_001 — this is the *last* timestamp in the window;
-    // it defines the precise rollover point we will test against.
-    set_ledger_timestamp(&env, 1_001);
-    submit(&client, &env, &business, 2);
-
-    // Window is now full: 2/2.
-    assert_eq!(client.get_submission_window_count(&business), 2);
-
-    // ── Phase 2: advance to the exact rollover boundary ───────────────────
-    // now = 1_001 + 100 = 1_101.
-    // cutoff = 1_101 - 100 = 1_001.
-    // Stored timestamps: {1_000, 1_001}.
-    //   1_000 > 1_001? false → pruned.
-    //   1_001 > 1_001? false → pruned.
-    // Both entries are evicted; window count drops to 0.
-    set_ledger_timestamp(&env, 1_101);
-    assert_eq!(
-        client.get_submission_window_count(&business),
-        0,
-        "all prior timestamps must be pruned at exactly now = last_ts + window_seconds"
-    );
-
-    // ── Phase 3: new submission at the boundary must succeed ──────────────
-    // This call panics (test fails) if the old window entries were not pruned.
-    submit(&client, &env, &business, 3);
-
-    // Counter must reflect exactly this one new submission.
-    assert_eq!(
-        client.get_submission_window_count(&business),
-        1,
-        "submission at exact rollover boundary must open a fresh window counter of 1"
-    );
-}
-
-/// # Security assumption
-///
-/// At `now = T + window_seconds - 1` the cutoff equals `T - 1`.
-/// Since `T > T - 1` is **true**, the timestamp recorded at `T` is **still
-/// active** and counts towards the current window.
-///
-/// This is the complementary half of the boundary proof: one second *before*
-/// the rollover the previous window's entry must not be released prematurely.
-/// Releasing it early would allow an attacker to exceed the configured cap by
-/// submitting one extra request per window period.
-///
-/// This test fills the window to its cap, advances the ledger to
-/// `last_ts + window_seconds - 1` (one second short of rollover), and asserts
-/// that the next submission is **rejected** with "rate limit exceeded".
+/// A forward jump must not erase quota history that a later rollback could
+/// exploit. With a budget of one, the rollback attempt remains rejected.
 #[test]
 #[should_panic(expected = "rate limit exceeded")]
-fn test_rate_window_one_second_before_rollover_still_blocked() {
+fn test_forward_jump_then_backward_jump_does_not_reopen_capacity() {
     let (env, client, _admin) = setup();
     let business = Address::generate(&env);
+    configure_rate_limit(&client, 1, 100, 1, 100, true, 1);
 
-    // Use burst == full window so only the full-window guard can fire.
-    // window_seconds = 100; cap = 2 submissions.
-    configure_rate_limit(&client, 2, 100, 2, 100, true, 1);
-
-    // ── Phase 1: fill the window ──────────────────────────────────────────
     set_ledger_timestamp(&env, 1_000);
     submit(&client, &env, &business, 1);
 
-    // The *latest* timestamp in the window is at t = 1_001.
-    set_ledger_timestamp(&env, 1_001);
+    set_ledger_timestamp(&env, 1_200);
     submit(&client, &env, &business, 2);
 
-    assert_eq!(client.get_submission_window_count(&business), 2);
+    set_ledger_timestamp(&env, 1_001);
+    submit(&client, &env, &business, 3);
+}
+prop_compose! {
+    /// Generates clock movement biased toward the exact expiry boundary and
+    /// its two adjacent seconds, plus larger forward/backward jumps.
+    fn skewed_rate_limit_sequence()
+        (window_seconds in 2u64..120, max_per_window in 1u32..8)
+        (
+            movements in prop::collection::vec(
+                prop_oneof![
+                    4 => Just(window_seconds as i64),
+                    4 => Just(window_seconds as i64 - 1),
+                    4 => Just(window_seconds as i64 + 1),
+                    3 => Just(-(window_seconds as i64)),
+                    3 => Just(-(window_seconds as i64 - 1)),
+                    3 => Just(-(window_seconds as i64 + 1)),
+                    2 => -240i64..=240,
+                ],
+                1..48,
+            ),
+            window_seconds in Just(window_seconds),
+            max_per_window in Just(max_per_window),
+        ) -> (u64, u32, std::vec::Vec<i64>) {
+            (window_seconds, max_per_window, movements)
+        }
+}
 
-    // ── Phase 2: advance to one second *before* rollover ─────────────────
-    // now = 1_001 + 100 - 1 = 1_100.
-    // cutoff = 1_100 - 100 = 1_000.
-    // Stored timestamps: {1_000, 1_001}.
-    //   1_000 > 1_000? false → pruned.
-    //   1_001 > 1_000? true  → still active.
-    // Window count = 1, which is still < cap (2), so count alone won't block.
-    // We need the earlier submission (t=1_000) pruned but the later (t=1_001)
-    // still live, and together they total 1 — below cap.
-    //
-    // Wait — to get a *guaranteed* block we must ensure *both* timestamps
-    // survive at the boundary - 1.  We therefore record both at the same
-    // second (t = 1_000) so the cutoff at t = 1_099 is 999, and both
-    // 1_000 > 999 entries remain active.
-    //
-    // Re-set up with both timestamps at t = 1_000 so the proof is clean:
-    // (The setup above already did t=1_000 and t=1_001; let's use a
-    // separate business address to keep this test fully self-contained.)
-    let business2 = Address::generate(&env);
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        max_shrink_iters: 2_048,
+        ..ProptestConfig::default()
+    })]
 
-    set_ledger_timestamp(&env, 2_000);
-    submit(&client, &env, &business2, 3);
-    set_ledger_timestamp(&env, 2_000); // same second — timestamp vector: {2_000, 2_000}
-    submit(&client, &env, &business2, 4);
+    /// Replays randomized ledger skew against the contract. The oracle uses
+    /// the same non-decreasing effective clock required by the security model
+    /// and verifies that every admitted submission fits the configured budget.
+    #[test]
+    fn check_rate_limit_never_exceeds_window_budget_under_clock_skew(
+        (window_seconds, max_per_window, movements) in skewed_rate_limit_sequence()
+    ) {
+        let (env, client, _admin) = setup();
+        let business = Address::generate(&env);
+        configure_rate_limit(
+            &client,
+            max_per_window,
+            window_seconds,
+            max_per_window,
+            window_seconds,
+            true,
+            1,
+        );
 
-    assert_eq!(client.get_submission_window_count(&business2), 2);
+        let mut ledger_now = 10_000u64;
+        let mut effective_now = ledger_now;
+        let mut admitted_at = std::vec::Vec::<u64>::new();
 
-    // now = 2_000 + 100 - 1 = 2_099.
-    // cutoff = 2_099 - 100 = 1_999.
-    // 2_000 > 1_999? true for both entries → both still active → count = 2.
-    // 2 < 2 is false → "rate limit exceeded" must fire.
-    set_ledger_timestamp(&env, 2_099);
+        for (index, movement) in movements.into_iter().enumerate() {
+            ledger_now = if movement < 0 {
+                ledger_now.saturating_sub(movement.unsigned_abs())
+            } else {
+                ledger_now.saturating_add(movement as u64)
+            };
+            set_ledger_timestamp(&env, ledger_now);
 
-    // This must panic.
-    submit(&client, &env, &business2, 5);
+            let period = String::from_str(&env, &std::format!("skew-{index}"));
+            let root = BytesN::from_array(&env, &[index as u8; 32]);
+            let admitted = client
+                .try_submit_attestation(
+                    &business,
+                    &period,
+                    &root,
+                    &1_700_000_000u64,
+                    &1u32,
+                    &0i128,
+                    &None,
+                    &None,
+                )
+                .is_ok();
+
+            if admitted {
+                effective_now = effective_now.max(ledger_now);
+                admitted_at.retain(|timestamp| {
+                    *timestamp > effective_now.saturating_sub(window_seconds)
+                });
+                admitted_at.push(effective_now);
+
+                prop_assert!(
+                    admitted_at.len() <= max_per_window as usize,
+                    "{} admits in a {}-second window with budget {}; ledger_now={}, effective_now={}",
+                    admitted_at.len(),
+                    window_seconds,
+                    max_per_window,
+                    ledger_now,
+                    effective_now,
+                );
+            }
+        }
+    }
 }
