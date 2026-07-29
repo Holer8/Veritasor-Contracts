@@ -47,9 +47,7 @@
 //! | `EpochAdvanced`             | `ep_adv`       | *(none)*          |
 //! | `CleanupSummary`            | `cl_sum`       | *(none)*          |
 //! | `BackfillCheckpoint`        | `bkf_chk`      | *(none)*          |
-//! | `StakingContractProposed`   | `sk_prop`      | *(none)*          |
-//! | `StakingContractCommitted`  | `sk_com`       | *(none)*          |
-//! | `StakingContractCancelled`  | `sk_canc`      | *(none)*          |
+//! | `DisputeRolledBack`         | `dsp_rb`       | `business`        |
 //!
 //! ## Indexer Compatibility Contract
 //!
@@ -168,12 +166,8 @@ pub const TOPIC_APPROVAL_REVOKED: Symbol = symbol_short!("appr_rv");
 pub const TOPIC_EPOCH_CHECKPOINT: Symbol = symbol_short!("ep_ckpt");
 /// Topic: backfill checkpoint emitted every N submissions (global counter)
 pub const TOPIC_BACKFILL_CHECKPOINT: Symbol = symbol_short!("bkf_chk");
-/// Topic: attestor staking contract rebinding proposed (24 h time-locked)
-pub const TOPIC_STAKING_CONTRACT_PROPOSED: Symbol = symbol_short!("sk_prop");
-/// Topic: attestor staking contract rebinding committed after timelock
-pub const TOPIC_STAKING_CONTRACT_COMMITTED: Symbol = symbol_short!("sk_com");
-/// Topic: attestor staking contract rebinding proposal cancelled
-pub const TOPIC_STAKING_CONTRACT_CANCELLED: Symbol = symbol_short!("sk_canc");
+/// Topic: dispute automatically rolled back after deadline exceeded
+pub const TOPIC_DISPUTE_ROLLED_BACK: Symbol = symbol_short!("dsp_rb");
 
 // ════════════════════════════════════════════════════════════════════
 //  Normalized Event Data Structures
@@ -749,6 +743,25 @@ pub struct ProposalCleanedEvent {
     pub cleaned_at: u32,
 }
 
+/// Normalized payload for `DisputeRolledBack` events.
+///
+/// Emitted when an open dispute exceeds the configurable resolution deadline
+/// and is automatically rolled back to the pre-dispute attestation state.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DisputeRolledBackEvent {
+    /// Unique identifier of the dispute that was rolled back.
+    pub dispute_id: u64,
+    /// Business address associated with the dispute.
+    pub business: Address,
+    /// Period identifier of the disputed attestation.
+    pub period: String,
+    /// Ledger timestamp when the rollback occurred.
+    pub rolled_back_at: u64,
+    /// The deadline threshold in seconds that was exceeded.
+    pub deadline_seconds: u64,
+}
+
 /// Normalized payload for `SlashTriggered` events.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -934,6 +947,40 @@ pub fn emit_attestation_cleaned_up(env: &Env, business: &Address, period: &Strin
     };
     env.events()
         .publish((TOPIC_ATTESTATION_CLEANED_UP, business.clone()), event);
+}
+
+/// Emit a `DisputeRolledBack` event.
+///
+/// Call this after a dispute has been automatically rolled back due to
+/// exceeding the resolution deadline.
+///
+/// # Arguments
+///
+/// * `env`              – Soroban execution environment.
+/// * `dispute_id`       – Unique identifier of the rolled-back dispute.
+/// * `business`         – Business address associated with the dispute.
+/// * `period`           – Period identifier of the disputed attestation.
+/// * `deadline_seconds` – The deadline threshold that was exceeded.
+///
+/// # Events
+///
+/// Publishes `(dsp_rb, business)` → `DisputeRolledBackEvent`.
+pub fn emit_dispute_rolled_back(
+    env: &Env,
+    dispute_id: u64,
+    business: &Address,
+    period: &String,
+    deadline_seconds: u64,
+) {
+    let event = DisputeRolledBackEvent {
+        dispute_id,
+        business: business.clone(),
+        period: period.clone(),
+        rolled_back_at: env.ledger().timestamp(),
+        deadline_seconds,
+    };
+    env.events()
+        .publish((TOPIC_DISPUTE_ROLLED_BACK, business.clone()), event);
 }
 
 /// Emit a `SlashTriggered` event.
