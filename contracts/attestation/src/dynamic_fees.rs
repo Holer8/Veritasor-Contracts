@@ -75,7 +75,6 @@ pub const FEE_BUCKET_WINDOW_SECONDS: u64 = 86400; // 24 * 60 * 60
 /// Users must have at least this window to observe and react to pending fee changes.
 pub const FEE_TIMELOCK_SECONDS: u64 = 86400; // 24 hours
 
-
 // ════════════════════════════════════════════════════════════════════
 //  Storage types
 // ════════════════════════════════════════════════════════════════════
@@ -159,9 +158,13 @@ pub enum DataKey {
     EpochFees(soroban_sdk::String),
     /// Global running submission count for backfill checkpointing.
     BackfillSubmissionCount,
-    /// Highest ledger timestamp observed for a successful rate-limited
-    /// submission, keyed per business. Appended for storage compatibility.
-    RateLimitHighWaterTimestamp(Address),
+    // ── Archive Tier ─────────────────────────────────────────────
+    /// Global archive index.
+    ArchiveIndex,
+    /// Full attestation record stored in the archive.
+    ArchivedAttestation(Address, soroban_sdk::String),
+    /// Lightweight archive pointer.
+    ArchivePointer(Address, soroban_sdk::String),
 }
 
 // ════════════════════════════════════════════════════════════════════

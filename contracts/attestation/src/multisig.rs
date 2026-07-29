@@ -49,6 +49,9 @@ pub const PROPOSAL_COOLDOWN_LEDGERS: u32 = 1_000;
 /// Default grace period after proposal expiry before auto-cleanup (ledger sequences)
 pub const DEFAULT_PROPOSAL_EXPIRY_GRACE: u32 = 10_000;
 
+/// Cooldown period for quorum (threshold) changes, in ledger sequences.
+pub const PROPOSAL_COOLDOWN_LEDGERS: u32 = 1_000;
+
 // ════════════════════════════════════════════════════════════════════
 //  Storage Types
 // ════════════════════════════════════════════════════════════════════
@@ -77,6 +80,8 @@ pub enum MultisigKey {
     /// Closing the flash-vote attack surface (issue #512).
     /// Keyed by proposal ID; presence is mandatory for every live proposal.
     VoteWeightSnapshot(u64),
+    /// Ledger sequence of the last quorum change
+    LastQuorumChange,
 }
 
 /// Snapshot of governance vote weights captured when a proposal is created.
