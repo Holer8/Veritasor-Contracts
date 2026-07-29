@@ -42,8 +42,10 @@
 //! | `BusinessApproved`          | `biz_apr`      | `business`        |
 //! | `BusinessSuspended`         | `biz_sus`      | `business`        |
 //! | `BusinessReactivated`       | `biz_rea`      | `business`        |
-//! | `EpochAdvanced`             | `ep_adv`       | *(none)*          |
+//! | `ApprovalRevoked`           | `appr_rv`      | `proposal_id`     |
 //! | `EpochCheckpoint`           | `ep_ckpt`      | *(none)*          |
+//! | `EpochAdvanced`             | `ep_adv`       | *(none)*          |
+//! | `BackfillCheckpoint`        | `bkf_chk`      | *(none)*          |
 //!
 //! ## Indexer Compatibility Contract
 //!
@@ -154,8 +156,14 @@ pub const TOPIC_REVOCATION_PROPOSED: Symbol = symbol_short!("rv_prop");
 pub const TOPIC_REVOCATION_CANCELLED: Symbol = symbol_short!("rv_canc");
 /// Topic: revocation committed (grace window elapsed, revocation finalised)
 pub const TOPIC_REVOCATION_COMMITTED: Symbol = symbol_short!("rv_cmmt");
-/// Topic: relayer gas reported for delegated submission
-pub const TOPIC_RELAYER_GAS_REPORTED: Symbol = symbol_short!("rl_gas");
+/// Topic: multisig approval revoked before quorum reached
+pub const TOPIC_APPROVAL_REVOKED: Symbol = symbol_short!("appr_rv");
+/// Topic: epoch checkpoint emitted after each submission (per-period)
+pub const TOPIC_EPOCH_CHECKPOINT: Symbol = symbol_short!("ep_ckpt");
+/// Topic: epoch advanced on fee-bucket window rollover
+pub const TOPIC_EPOCH_ADVANCED: Symbol = symbol_short!("ep_adv");
+/// Topic: backfill checkpoint emitted every N submissions (global counter)
+pub const TOPIC_BACKFILL_CHECKPOINT: Symbol = symbol_short!("bkf_chk");
 
 // ════════════════════════════════════════════════════════════════════
 //  Normalized Event Data Structures
@@ -1779,6 +1787,50 @@ pub fn emit_revocation_committed(
     };
     env.events()
         .publish((TOPIC_REVOCATION_COMMITTED, business.clone()), event);
+}
+
+// ── Multisig approvals ────────────────────────────────────────────
+
+/// Normalized payload for `ApprovalRevoked` events.
+///
+/// Emitted when an approver withdraws their approval from a pending
+/// multisig proposal before quorum has been reached (and before execution).
+///
+/// | Event Catalog | Topic   | Secondary topic |
+/// |---------------|---------|-----------------|
+/// | ApprovalRevoked | `appr_rv` | `proposal_id` |
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ApprovalRevokedEvent {
+    /// Unique identifier of the proposal.
+    pub proposal_id: u64,
+    /// Address that revoked their approval.
+    pub approver: Address,
+}
+
+/// Emit an `ApprovalRevoked` event.
+///
+/// Call this after an approver's vote has been removed from a pending
+/// multisig proposal (swap-and-pop from the approvals list, count
+/// decremented). Idempotent revocations (approval didn't exist) should
+/// not call this — only emit on an actual state change.
+///
+/// # Arguments
+///
+/// * `env`         – Soroban execution environment.
+/// * `proposal_id` – Unique identifier of the proposal.
+/// * `approver`    – Address that revoked their approval.
+///
+/// # Events
+///
+/// Publishes `(appr_rv, proposal_id)` → `ApprovalRevokedEvent`.
+pub fn emit_approval_revoked(env: &Env, proposal_id: u64, approver: &Address) {
+    let event = ApprovalRevokedEvent {
+        proposal_id,
+        approver: approver.clone(),
+    };
+    env.events()
+        .publish((TOPIC_APPROVAL_REVOKED, proposal_id), event);
 }
 
 // ════════════════════════════════════════════════════════════════════
