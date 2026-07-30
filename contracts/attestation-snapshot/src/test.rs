@@ -20,6 +20,8 @@ fn setup_snapshot_only() -> (Env, AttestationSnapshotContractClient<'static>, Ad
 }
 
 /// Helper to create a valid RestoreEntry with the current schema version.
+/// `business_count` defaults to 1 (one entry for this business in the batch).
+/// Use `make_entry_with_count` when a different declared count is needed.
 fn make_entry(
     env: &Env,
     business: &Address,
@@ -40,6 +42,33 @@ fn make_entry(
             recorded_at,
         },
         schema_version: SNAPSHOT_SCHEMA_VERSION,
+        business_count: 1,
+    }
+}
+
+/// Like `make_entry` but with an explicit `business_count` declaration.
+fn make_entry_with_count(
+    env: &Env,
+    business: &Address,
+    period: &str,
+    trailing_revenue: i128,
+    anomaly_count: u32,
+    attestation_count: u64,
+    recorded_at: u64,
+    business_count: u32,
+) -> RestoreEntry {
+    RestoreEntry {
+        business: business.clone(),
+        period: String::from_str(env, period),
+        record: SnapshotRecord {
+            period: String::from_str(env, period),
+            trailing_revenue,
+            anomaly_count,
+            attestation_count,
+            recorded_at,
+        },
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        business_count,
     }
 }
 
@@ -550,6 +579,7 @@ fn test_restore_dry_run_missing_version_field_panics() {
             recorded_at: 1_000_000,
         },
         schema_version: 0, // Missing/zero version
+        business_count: 1,
     };
 
     let entries = vec![&env, entry];
