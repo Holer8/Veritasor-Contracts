@@ -38,6 +38,12 @@
 //! - **Nonces monotonic**: `recorded_at` values for the same business must be non-decreasing
 //!   across periods (ordered as supplied).
 //!
+//! `restore_commit` additionally enforces:
+//! - **business_count cross-check**: for each distinct business in the batch, the number of
+//!   entries present must equal the `business_count` declared in that business's `RestoreEntry`
+//!   header. A mismatch emits a [`RestoreAbortedEvent`] and aborts the entire restore before
+//!   any state is written, protecting against truncated or tampered snapshot payloads.
+//!
 //! ## Security notes
 //!
 //! - `restore_dry_run` is completely side-effect-free on business state; it only writes a
@@ -60,12 +66,6 @@ pub const MAX_BUSINESS_PERIODS: u32 = 512;
 
 /// Maximum indexed businesses per epoch.
 pub const MAX_EPOCH_BUSINESSES: u32 = 512;
-
-/// Maximum number of records accepted in a restore batch.
-pub const MAX_RESTORE_BATCH: u32 = 512;
-
-/// Ledgers after dry-run during which its restore token remains valid.
-pub const RESTORE_COMMIT_WINDOW_LEDGERS: u32 = 600;
 
 // ════════════════════════════════════════════════════════════════════
 //  Snapshot schema versioning
@@ -167,6 +167,44 @@ pub struct RestoreVersionMismatchEvent {
     pub detected_at: u64,
 }
 
+/// Topic: restore aborted due to a business_count cross-check failure.
+///
+/// ## Security Notes
+///
+/// - Emitted before the function panics so off-chain indexers can detect aborted
+///   restores without parsing panic messages.
+/// - Contains the declared and actual counts to aid incident investigation.
+/// - No business state is written when this event is emitted.
+pub const TOPIC_RESTORE_ABORTED: Symbol = symbol_short!("rst_abort");
+
+/// Payload emitted when `restore_commit` detects a `business_count` mismatch
+/// between the value declared in a `RestoreEntry` header and the number of
+/// entries for that business actually present in the batch.
+///
+/// The event is emitted **before** the function panics and **after** the pending
+/// token has already been consumed, so no second commit is possible with the
+/// same token.
+///
+/// ## Security Notes
+///
+/// - A mismatch may indicate a truncated or tampered snapshot batch.
+/// - The restore is fully aborted: no entries from the batch are written to
+///   storage.
+/// - Only the first business whose count mismatches is reported; the restore
+///   does not continue past the first violation.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RestoreAbortedEvent {
+    /// The business address whose declared count did not match.
+    pub business: Address,
+    /// The `business_count` value declared in the `RestoreEntry` header.
+    pub declared_count: u32,
+    /// The number of entries for this business actually found in the batch.
+    pub actual_count: u32,
+    /// Ledger timestamp when the abort was detected.
+    pub detected_at: u64,
+}
+
 /// Attestation contract client: WASM import for wasm32 (avoids duplicate symbols), crate for tests.
 #[cfg(target_arch = "wasm32")]
 mod attestation_import {
@@ -230,6 +268,9 @@ pub enum DataKey {
 pub enum SnapshotError {
     /// The restore batch fingerprint matches the last successfully applied batch.
     AlreadyRestored = 1,
+    /// The number of entries for a business in the batch does not match the
+    /// `business_count` declared in that business's `RestoreEntry` header.
+    BusinessCountMismatch = 2,
 }
 
 /// A single snapshot record for (business, period).
@@ -276,6 +317,17 @@ pub struct RestoreEntry {
     pub record: SnapshotRecord,
     /// Schema version of this entry's encoding. Must match `SNAPSHOT_SCHEMA_VERSION`.
     pub schema_version: u32,
+    /// Declared total number of snapshot entries for this business in the batch.
+    ///
+    /// During `restore_commit` the contract counts how many entries in the batch
+    /// share this `business` address and asserts that count equals `business_count`.
+    /// A mismatch aborts the entire restore and emits a `RestoreAborted` event,
+    /// protecting against truncated or tampered snapshots.
+    ///
+    /// All entries for the same business must declare the same value; the first
+    /// entry encountered for each business is used as the authoritative declared
+    /// count.
+    pub business_count: u32,
 }
 
 /// Outcome of a single-entry invariant check.
@@ -697,6 +749,8 @@ impl AttestationSnapshotContract {
     /// - The token has not expired.
     /// - The `entries` batch hash matches the token exactly.
     /// - All entries declare `schema_version == SNAPSHOT_SCHEMA_VERSION`.
+    /// - For each distinct business, the number of entries in the batch matches
+    ///   the `business_count` declared in that business's first `RestoreEntry`.
     ///
     /// On success all entries are written to storage and the pending token is
     /// consumed (one-shot). Entries whose epoch is already finalized are skipped
@@ -709,6 +763,9 @@ impl AttestationSnapshotContract {
     /// - Token is deleted before writes begin (re-entrancy guard).
     /// - Schema version re-check at commit time provides defence-in-depth against
     ///   direct commit calls that bypass dry-run.
+    /// - `business_count` cross-check aborts the restore and emits a
+    ///   [`RestoreAbortedEvent`] before any state is written when a truncated or
+    ///   tampered batch is detected.
     pub fn restore_commit(env: Env, caller: Address, entries: Vec<RestoreEntry>) {
         Self::require_admin(&env, &caller);
 
@@ -754,6 +811,84 @@ impl AttestationSnapshotContract {
             }
         }
 
+        // ── business_count cross-check ──────────────────────────────
+        //
+        // For each distinct business in the batch, count how many entries are
+        // present and compare against the `business_count` declared in the first
+        // entry for that business.  A mismatch may indicate a truncated or tampered
+        // snapshot; the entire restore is aborted before any state is written.
+        //
+        // The check runs over ALL entries (including those for finalized epochs) so
+        // that a tampered batch cannot bypass it by targeting a finalized epoch.
+        let mut biz_declared: Vec<(Address, u32)> = Vec::new(&env);
+        let mut biz_actual: Vec<(Address, u32)> = Vec::new(&env);
+
+        for i in 0..entries.len() {
+            let entry = entries.get(i).unwrap();
+
+            // Record declared count from the first entry for this business.
+            let mut found = false;
+            for j in 0..biz_declared.len() {
+                let pair = biz_declared.get(j).unwrap();
+                if pair.0 == entry.business {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                biz_declared.push_back((entry.business.clone(), entry.business_count));
+            }
+
+            // Increment actual count.
+            let mut found_actual = false;
+            for j in 0..biz_actual.len() {
+                let pair = biz_actual.get(j).unwrap();
+                if pair.0 == entry.business {
+                    // Rebuild with incremented count.
+                    let mut updated: Vec<(Address, u32)> = Vec::new(&env);
+                    for k in 0..biz_actual.len() {
+                        let kp = biz_actual.get(k).unwrap();
+                        if kp.0 == entry.business {
+                            updated.push_back((entry.business.clone(), kp.1 + 1));
+                        } else {
+                            updated.push_back(kp);
+                        }
+                    }
+                    biz_actual = updated;
+                    found_actual = true;
+                    break;
+                }
+            }
+            if !found_actual {
+                biz_actual.push_back((entry.business.clone(), 1));
+            }
+        }
+
+        // Compare declared vs actual for every business.
+        for i in 0..biz_declared.len() {
+            let (business, declared) = biz_declared.get(i).unwrap();
+            let mut actual: u32 = 0;
+            for j in 0..biz_actual.len() {
+                let pair = biz_actual.get(j).unwrap();
+                if pair.0 == business {
+                    actual = pair.1;
+                    break;
+                }
+            }
+            if declared != actual {
+                let event = RestoreAbortedEvent {
+                    business: business.clone(),
+                    declared_count: declared,
+                    actual_count: actual,
+                    detected_at: now_ts,
+                };
+                env.events()
+                    .publish((TOPIC_RESTORE_ABORTED, caller.clone()), event);
+                panic!("restore aborted: business_count mismatch");
+            }
+        }
+
+        // ── Write entries ───────────────────────────────────────────
         for i in 0..entries.len() {
             let entry = entries.get(i).unwrap();
 
@@ -1073,14 +1208,6 @@ impl AttestationSnapshotContract {
     }
 }
 
-    /// Compute a deterministic identifier that binds every restore field.
-    ///
-    /// Contract-value serialization is length-delimited and avoids ambiguous
-    /// concatenation. Changing a business, period, metric, count, or timestamp
-    /// therefore produces a different restore identifier.
-    fn compute_batch_hash(env: &Env, entries: &Vec<RestoreEntry>) -> BytesN<32> {
-        env.crypto().sha256(&entries.clone().to_xdr(env)).into()
-    }
 }
 #[cfg(test)]
 mod snapshot_ttl_test;
