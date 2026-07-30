@@ -139,6 +139,7 @@ pub const TOPIC_KEY_ROTATION_CANCELLED: Symbol = symbol_short!("kr_canc");
 /// Topic: emergency key rotation executed
 pub const TOPIC_KEY_ROTATION_EMERGENCY: Symbol = symbol_short!("kr_emer");
 /// Topic: analytics rotation completed
+pub const TOPIC_REHYDRATED_FROM_ARCHIVE: Symbol = symbol_short!("rehydrate");
 pub const TOPIC_ANALYTICS_ROTATION_COMPLETED: Symbol = symbol_short!("anly_cm");
 /// Topic: emergency pause triggered (dual-key bypass)
 pub const TOPIC_EMERGENCY_PAUSE_TRIGGERED: Symbol = symbol_short!("emr_pse");
@@ -2144,4 +2145,14 @@ pub fn emit_archival_compacted(
         compacted_by: compacted_by.clone(),
     };
     env.events().publish((TOPIC_ARCHIVAL_COMPACTED,), event);
+}
+
+pub fn emit_rehydrated_from_archive(
+    env: &Env,
+    business: &Address,
+    period: &String,
+    source_epoch: u32,
+) {
+    let topics = (TOPIC_REHYDRATED_FROM_ARCHIVE, business.clone(), period.clone());
+    env.events().publish(topics, source_epoch);
 }

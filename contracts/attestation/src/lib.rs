@@ -1061,13 +1061,44 @@ impl AttestationContract {
     }
 
     pub fn get_attestation(env: Env, business: Address, period: String) -> Option<AttestationData> {
-        let key = DataKey::Attestation(business.clone(), period.clone());
-        // Primary read: active tier.
-        if let Some(data) = env.storage().instance().get::<_, AttestationData>(&key) {
-            return Some(data);
+        if let Some(att_data) =
+            env.storage()
+                .persistent()
+                .get::<_, AttestationData>(&DataKey::Attestation(business.clone(), period.clone()))
+        {
+            let current_config = network_config::get_config(&env);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Attestation(business.clone(), period.clone()),
+                current_config.min_persistent_entry_ttl,
+                current_config.max_entry_ttl,
+            );
+            return Some(att_data);
         }
-        // Read-through: fall back to archive tier transparently.
-        dynamic_fees::get_archived_attestation(&env, &business, &period)
+
+        // Try reading from archive
+        let archive_key = DataKey::AttestationSnapshot(business.clone(), period.clone());
+        if let Some(archived_att_data) = env.storage().persistent().get::<_, AttestationData>(&archive_key) {
+            let current_config = network_config::get_config(&env);
+
+            // Rehydrate back to active storage
+            let active_key = DataKey::Attestation(business.clone(), period.clone());
+            env.storage().persistent().set(&active_key, &archived_att_data);
+            env.storage().persistent().extend_ttl(
+                &active_key,
+                current_config.min_persistent_entry_ttl,
+                current_config.max_entry_ttl,
+            );
+
+            // Emit rehydrate event
+            events::emit_rehydrated_from_archive(&env, &business, &period, archived_att_data.3);
+
+            // Remove from archive to complete the move
+            env.storage().persistent().remove(&archive_key);
+
+            return Some(archived_att_data);
+        }
+        
+        None
     }
 
     // ── Archival tier movement ────────────────────────────────────────
@@ -1437,14 +1468,45 @@ impl AttestationContract {
         business: Address,
         periods: Vec<String>,
     ) -> AttestationStatusResult {
-        let mut results = Vec::new(&env);
+        let mut result = Vec::new(&env);
         for period in periods.iter() {
-            let attestation = Self::get_attestation(env.clone(), business.clone(), period.clone());
-            let revocation =
-                Self::get_revocation_info(env.clone(), business.clone(), period.clone());
-            results.push_back((period, attestation, revocation));
+            let mut found = false;
+            if let Some(att_data) = env
+                .storage()
+                .persistent()
+                .get::<_, AttestationData>(&DataKey::Attestation(business.clone(), period.clone()))
+            {
+                let current_config = network_config::get_config(&env);
+                env.storage().persistent().extend_ttl(
+                    &DataKey::Attestation(business.clone(), period.clone()),
+                    current_config.min_persistent_entry_ttl,
+                    current_config.max_entry_ttl,
+                );
+                result.push_back((period.clone(), att_data.clone(), Self::get_revocation_info(env.clone(), business.clone(), period.clone())));
+                found = true;
+            }
+            
+            if !found {
+                let archive_key = DataKey::AttestationSnapshot(business.clone(), period.clone());
+                if let Some(archived_att_data) = env.storage().persistent().get::<_, AttestationData>(&archive_key) {
+                    let current_config = network_config::get_config(&env);
+        
+                    let active_key = DataKey::Attestation(business.clone(), period.clone());
+                    env.storage().persistent().set(&active_key, &archived_att_data);
+                    env.storage().persistent().extend_ttl(
+                        &active_key,
+                        current_config.min_persistent_entry_ttl,
+                        current_config.max_entry_ttl,
+                    );
+        
+                    events::emit_rehydrated_from_archive(&env, &business, &period, archived_att_data.3);
+                    env.storage().persistent().remove(&archive_key);
+        
+                    result.push_back((period.clone(), archived_att_data, Self::get_revocation_info(env.clone(), business.clone(), period.clone())));
+                }
+            }
         }
-        results
+        result
     }
 
     pub fn verify_attestation(
