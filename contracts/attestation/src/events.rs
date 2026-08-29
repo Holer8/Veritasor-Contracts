@@ -171,6 +171,8 @@ pub const TOPIC_EPOCH_CHECKPOINT: Symbol = symbol_short!("ep_ckpt");
 pub const TOPIC_BACKFILL_CHECKPOINT: Symbol = symbol_short!("bkf_chk");
 /// Topic: archival compaction completed
 pub const TOPIC_ARCHIVAL_COMPACTED: Symbol = symbol_short!("arc_cmp");
+/// Topic: reputation gating check performed
+pub const TOPIC_REPUTATION_GATE_CHECK: Symbol = symbol_short!("rep_gat");
 
 // ════════════════════════════════════════════════════════════════════
 //  Normalized Event Data Structures
@@ -212,6 +214,30 @@ pub struct AttestationSubmittedEvent {
     pub proof_hash: Option<BytesN<32>>,
     /// Optional Unix timestamp after which this attestation expires.
     pub expiry_timestamp: Option<u64>,
+}
+
+// ── Reputation gating ─────────────────────────────────────────
+
+/// Normalized payload for `ReputationGateCheck` events.
+///
+/// Emitted whenever a submission is checked against reputation gating (if enabled).
+/// This event is emitted regardless of whether the check passes or fails, allowing
+/// operators to observe gating behavior without leaking sensitive implementation details.
+///
+/// | Event Catalog | Topic   | Secondary topic |
+/// |---------------|---------|-----------------|
+/// | ReputationGateCheck | `rep_gat` | `attestor` (or business if attestor absent) |
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ReputationGateCheckEvent {
+    /// Attestor (or business) whose reputation was checked.
+    pub attestor: Address,
+    /// Current reputation score of the attestor.
+    pub score: u64,
+    /// Minimum reputation score required for submission.
+    pub min_reputation: u64,
+    /// Whether the check passed (`true`) or failed (`false`).
+    pub allowed: bool,
 }
 
 // ── Revocation reason code ────────────────────────────────────────
@@ -2159,4 +2185,70 @@ pub fn emit_rehydrated_from_archive(
 ) {
     let topics = (TOPIC_REHYDRATED_FROM_ARCHIVE, business.clone(), period.clone());
     env.events().publish(topics, source_epoch);
+}
+
+/// Emit a `ReputationGateCheck` event.
+///
+/// Called whenever a reputation gating check is performed (if enabled). Emitted
+/// regardless of pass/fail to maintain observability. Only called when
+/// reputation gating is enabled.
+///
+/// * `env`              – Soroban execution environment.
+/// * `attestor`         – Address whose reputation was checked.
+/// * `score`            – Current reputation score.
+/// * `min_reputation`   – Minimum required score.
+/// * `allowed`          – Whether the check passed.
+///
+/// # Events
+///
+/// Publishes `(rep_gat, attestor)` → `ReputationGateCheckEvent`.
+pub fn emit_reputation_gate_check(
+    env: &Env,
+    attestor: &Address,
+    score: u64,
+    min_reputation: u64,
+    allowed: bool,
+) {
+    let event = ReputationGateCheckEvent {
+        attestor: attestor.clone(),
+        score,
+        min_reputation,
+        allowed,
+    };
+    env.events()
+        .publish((TOPIC_REPUTATION_GATE_CHECK, attestor.clone()), event);
+}
+
+/// Emit a `ReputationGateCheck` event.
+///
+/// Called whenever a reputation gating check is performed (if enabled). Emitted
+/// regardless of pass/fail to maintain observability. Only called when
+/// reputation gating is enabled.
+///
+/// # Arguments
+///
+/// * `env`              – Soroban execution environment.
+/// * `attestor`         – Address whose reputation was checked.
+/// * `score`            – Current reputation score.
+/// * `min_reputation`   – Minimum required score.
+/// * `allowed`          – Whether the check passed.
+///
+/// # Events
+///
+/// Publishes `(rep_gat, attestor)` → `ReputationGateCheckEvent`.
+pub fn emit_reputation_gate_check(
+    env: &Env,
+    attestor: &Address,
+    score: u64,
+    min_reputation: u64,
+    allowed: bool,
+) {
+    let event = ReputationGateCheckEvent {
+        attestor: attestor.clone(),
+        score,
+        min_reputation,
+        allowed,
+    };
+    env.events()
+        .publish((TOPIC_REPUTATION_GATE_CHECK, attestor.clone()), event);
 }
