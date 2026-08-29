@@ -12,6 +12,7 @@ use soroban_sdk::{
 };
 
 use veritasor_common::replay_protection;
+use veritasor_common::merkle;
 
 // Nonce channels
 pub const NONCE_CHANNEL_ADMIN: u32 = 0;
@@ -1136,8 +1137,76 @@ impl AttestationContract {
 
             return Some(archived_att_data);
         }
-        
+
         None
+    }
+
+    /// Verify a Merkle proof for a single leaf against the stored Merkle root for an attestation.
+    ///
+    /// This is a read-only helper that allows clients to verify off-chain generated Merkle proofs
+    /// against the on-chain stored root without modifying any contract state.
+    ///
+    /// # Parameters
+    /// - `business` – The business address that submitted the attestation.
+    /// - `period`   – The period identifier (e.g., "202401" for January 2024).
+    /// - `leaf`     – The pre-hashed leaf value (32 bytes) to verify.
+    /// - `proof`    – The Merkle proof as a vector of sibling hashes (bottom to top).
+    ///
+    /// # Returns
+    /// - `true`  – The proof is valid and the leaf is in the tree.
+    /// - `false` – The proof is invalid, the attestation does not exist, or the attestation is revoked.
+    ///
+    /// # Security & Behavior
+    /// - Returns `false` if the attestation does not exist for the given (business, period).
+    /// - Returns `false` if the attestation has been revoked.
+    /// - Uses SHA-256 with sorted children at each level (see `common::merkle::verify_merkle_proof`).
+    /// - Enforces `MAX_TREE_DEPTH` (64) to prevent unbounded verification work.
+    /// - Does not mutate any storage or emit events.
+    ///
+    /// # Leaf Hashing Convention
+    /// The leaf must be pre-hashed using the same convention as the attestation submitter:
+    /// - For revenue data: hash the serialized entry using your chosen scheme.
+    /// - The contract only verifies the provided leaf against the stored root; it does not
+    ///   re-hash raw data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let leaf = hash_entry_data(&env, &my_revenue_entry);
+    /// let proof = generate_merkle_proof_off_chain(&leaves, &leaf_index);
+    /// let is_valid = contract.verify_merkle_proof(&business, &period, &leaf, &proof);
+    /// ```
+    pub fn verify_merkle_proof(
+        env: Env,
+        business: Address,
+        period: String,
+        leaf: BytesN<32>,
+        proof: Vec<BytesN<32>>,
+    ) -> bool {
+        // Look up the attestation to get the stored Merkle root
+        let attestation_opt = Self::get_attestation(env.clone(), business.clone(), period.clone());
+        
+        let attestation = match attestation_opt {
+            Some(data) => data,
+            None => return false, // Attestation does not exist
+        };
+
+        // Check if the attestation has been revoked
+        let is_revoked = env.storage()
+            .instance()
+            .get::<_, bool>(&DataKey::Revoked(business.clone(), period.clone()))
+            .unwrap_or(false);
+        
+        if is_revoked {
+            return false; // Revoked attestations are not valid for proof verification
+        }
+
+        // Extract the Merkle root from the attestation data
+        // AttestationData format: (merkle_root, timestamp, version, fee_paid, proof_hash, expiry_timestamp)
+        let merkle_root = attestation.0;
+
+        // Verify the proof using the common merkle utility
+        // This uses SHA-256 with sorted children at each level
+        merkle::verify_merkle_proof(&env, &merkle_root, &leaf, &proof)
     }
 
     // ── Archival tier movement ────────────────────────────────────────
