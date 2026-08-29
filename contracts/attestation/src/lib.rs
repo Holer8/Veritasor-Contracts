@@ -3425,6 +3425,11 @@ mod dynamic_fees_test;
 mod epoch_counter_test;
 #[cfg(all(test, feature = "full-tests"))]
 mod cleanup_metrics_test;
+/// Focused tests for `cleanup_expired_attestation` (issue #789).
+/// Covers happy paths, authorization guards, event emission, metadata
+/// removal, cleanup-count increment, and backward compatibility.
+#[cfg(all(test, feature = "full-tests"))]
+mod cleanup_expired_attestation_test;
 #[cfg(all(test, feature = "full-tests"))]
 mod events_test;
 #[cfg(all(test, feature = "full-tests"))]
