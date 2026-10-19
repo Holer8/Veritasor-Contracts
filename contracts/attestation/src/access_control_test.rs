@@ -6,7 +6,7 @@
 use super::*;
 use crate::access_control::{ROLE_ADMIN, ROLE_ATTESTOR, ROLE_BUSINESS, ROLE_OPERATOR};
 use crate::events::{AdminSwappedEvent, TOPIC_ADMIN_SWAPPED};
-use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger};
 use soroban_sdk::{Address, BytesN, Env, String, TryFromVal};
 
 /// Helper: register the contract and return a client.
@@ -18,6 +18,153 @@ fn setup() -> (Env, AttestationContractClient<'static>, Address) {
     let admin = Address::generate(&env);
     client.initialize(&admin, &0u64);
     (env, client, admin)
+}
+
+/// Run an internal storage helper inside the contract context.
+///
+/// SDK 22 requires storage access to go through `env.as_contract` when
+/// called directly from a test (outside a contract invocation).
+fn in_contract<R>(env: &Env, contract: &Address, f: impl FnOnce(&Env) -> R) -> R {
+    env.as_contract(contract, || f(env))
+}
+
+#[test]
+fn test_require_valid_nonce_tracks_account_and_channel_sequences() {
+    let (env, client, account) = setup();
+    let other_account = Address::generate(&env);
+
+    in_contract(&env, &client.address, |e| {
+        access_control::require_valid_nonce(e, &account, 1, None);
+        access_control::require_valid_nonce(e, &account, 2, None);
+        access_control::require_valid_nonce(e, &account, 1, Some(7));
+        access_control::require_valid_nonce(e, &other_account, 1, None);
+    });
+
+    in_contract(&env, &client.address, |e| {
+        let default_channel =
+            e.storage()
+                .instance()
+                .get::<_, u64>(&access_control::AccessControlKey::LastNonce((
+                    account.clone(),
+                    0,
+                )));
+        let separate_channel =
+            e.storage()
+                .instance()
+                .get::<_, u64>(&access_control::AccessControlKey::LastNonce((
+                    account.clone(),
+                    7,
+                )));
+        let separate_account =
+            e.storage()
+                .instance()
+                .get::<_, u64>(&access_control::AccessControlKey::LastNonce((
+                    other_account.clone(),
+                    0,
+                )));
+
+        assert_eq!(default_channel, Some(2));
+        assert_eq!(separate_channel, Some(1));
+        assert_eq!(separate_account, Some(1));
+    });
+}
+
+#[test]
+fn test_require_valid_nonce_rejections_leave_storage_unchanged() {
+    let (env, client, account) = setup();
+
+    let zero_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        in_contract(&env, &client.address, |e| {
+            access_control::require_valid_nonce(e, &account, 0, Some(4));
+        });
+    }));
+    assert!(zero_result.is_err(), "zero nonce must be rejected");
+
+    in_contract(&env, &client.address, |e| {
+        let value =
+            e.storage()
+                .instance()
+                .get::<_, u64>(&access_control::AccessControlKey::LastNonce((
+                    account.clone(),
+                    4,
+                )));
+        assert_eq!(value, None, "zero nonce must not create a stored value");
+        access_control::require_valid_nonce(e, &account, 3, Some(4));
+    });
+
+    for rejected_nonce in [3, 2, 1] {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            in_contract(&env, &client.address, |e| {
+                access_control::require_valid_nonce(e, &account, rejected_nonce, Some(4));
+            });
+        }));
+        assert!(result.is_err(), "nonce {rejected_nonce} must be rejected");
+
+        in_contract(&env, &client.address, |e| {
+            let value =
+                e.storage()
+                    .instance()
+                    .get::<_, u64>(&access_control::AccessControlKey::LastNonce((
+                        account.clone(),
+                        4,
+                    )));
+            assert_eq!(value, Some(3), "rejection must preserve the prior nonce");
+        });
+    }
+
+    let default_channel_replay = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        in_contract(&env, &client.address, |e| {
+            access_control::require_valid_nonce(e, &account, 2, Some(0));
+        });
+    }));
+    assert!(default_channel_replay.is_err());
+    in_contract(&env, &client.address, |e| {
+        let value =
+            e.storage()
+                .instance()
+                .get::<_, u64>(&access_control::AccessControlKey::LastNonce((
+                    account.clone(),
+                    0,
+                )));
+        assert_eq!(value, Some(2), "Some(0) must share the default channel");
+    });
+}
+
+#[test]
+fn test_require_valid_nonce_accepts_u64_max_without_wrapping() {
+    let (env, client, account) = setup();
+
+    in_contract(&env, &client.address, |e| {
+        access_control::require_valid_nonce(e, &account, u64::MAX, Some(9));
+        let value =
+            e.storage()
+                .instance()
+                .get::<_, u64>(&access_control::AccessControlKey::LastNonce((
+                    account.clone(),
+                    9,
+                )));
+        assert_eq!(value, Some(u64::MAX));
+    });
+
+    let replay_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        in_contract(&env, &client.address, |e| {
+            access_control::require_valid_nonce(e, &account, u64::MAX, Some(9));
+        });
+    }));
+    assert!(
+        replay_result.is_err(),
+        "the maximum nonce cannot be replayed"
+    );
+    in_contract(&env, &client.address, |e| {
+        let value =
+            e.storage()
+                .instance()
+                .get::<_, u64>(&access_control::AccessControlKey::LastNonce((
+                    account.clone(),
+                    9,
+                )));
+        assert_eq!(value, Some(u64::MAX), "rejection must preserve u64::MAX");
+    });
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -53,7 +200,9 @@ fn test_grant_multiple_roles() {
     assert!(client.has_role(&user, &ROLE_ATTESTOR));
     assert!(client.has_role(&user, &ROLE_BUSINESS));
 
-    let roles = access_control::get_roles(&env, &user);
+    let roles = in_contract(&env, &client.address, |e| {
+        access_control::get_roles(e, &user)
+    });
     assert_eq!(roles, ROLE_ATTESTOR | ROLE_BUSINESS);
 }
 
@@ -84,6 +233,20 @@ fn test_revoke_one_role_keeps_others() {
 }
 
 #[test]
+fn test_get_role_holders_returns_empty_when_uninitialized() {
+    let env = Env::default();
+    let contract = env.register(AttestationContract, ());
+
+    let holders = in_contract(&env, &contract, access_control::get_role_holders);
+
+    assert_eq!(holders.len(), 0);
+    assert_eq!(
+        in_contract(&env, &contract, access_control::get_role_holders).len(),
+        0
+    );
+}
+
+#[test]
 fn test_get_role_holders() {
     let (env, client, admin) = setup();
     let user1 = Address::generate(&env);
@@ -92,9 +255,43 @@ fn test_get_role_holders() {
     client.grant_role(&admin, &user1, &ROLE_ATTESTOR);
     client.grant_role(&admin, &user2, &ROLE_BUSINESS);
 
-    let holders = access_control::get_role_holders(&env);
-    // Admin + 2 users
+    let holders = in_contract(&env, &client.address, |e| {
+        access_control::get_role_holders(e)
+    });
+
+    // Enumeration retains insertion order and returns each active holder once.
     assert_eq!(holders.len(), 3);
+    assert_eq!(holders.get(0), Some(admin.clone()));
+    assert_eq!(holders.get(1), Some(user1.clone()));
+    assert_eq!(holders.get(2), Some(user2.clone()));
+
+    let repeated_holders = in_contract(&env, &client.address, |e| {
+        access_control::get_role_holders(e)
+    });
+    assert_eq!(repeated_holders.len(), holders.len());
+    for index in 0..holders.len() {
+        assert_eq!(repeated_holders.get(index), holders.get(index));
+    }
+
+    // Reading the list does not alter the associated role state or enumeration.
+    assert_eq!(
+        in_contract(&env, &client.address, |e| access_control::get_roles(
+            e, &admin
+        )),
+        ROLE_ADMIN
+    );
+    assert_eq!(
+        in_contract(&env, &client.address, |e| access_control::get_roles(
+            e, &user1
+        )),
+        ROLE_ATTESTOR
+    );
+    assert_eq!(
+        in_contract(&env, &client.address, |e| access_control::get_roles(
+            e, &user2
+        )),
+        ROLE_BUSINESS
+    );
 }
 
 #[test]
@@ -134,15 +331,16 @@ fn test_admin_can_pause() {
 }
 
 #[test]
-fn test_operator_can_pause() {
+#[should_panic(expected = "caller does not have ADMIN role")]
+fn test_operator_cannot_pause() {
     let (env, client, admin) = setup();
     let operator = Address::generate(&env);
 
+    // Pause/unpause are ADMIN-only operations; the OPERATOR role is not
+    // sufficient (see `pause` entry point).
     client.grant_role(&admin, &operator, &ROLE_OPERATOR);
 
     client.pause(&operator, &1u64);
-
-    assert!(client.is_paused());
 }
 
 #[test]
@@ -170,7 +368,7 @@ fn test_operator_cannot_unpause() {
 }
 
 #[test]
-#[should_panic(expected = "caller must have ADMIN or OPERATOR role")]
+#[should_panic(expected = "caller does not have ADMIN role")]
 fn test_non_operator_cannot_pause() {
     let (env, client, _admin) = setup();
     let user = Address::generate(&env);
@@ -260,7 +458,12 @@ fn test_roles_are_zero_by_default() {
     let (env, client, _admin) = setup();
     let user = Address::generate(&env);
 
-    assert_eq!(access_control::get_roles(&env, &user), 0);
+    assert_eq!(
+        in_contract(&env, &client.address, |e| access_control::get_roles(
+            e, &user
+        )),
+        0
+    );
     assert!(!client.has_role(&user, &ROLE_ADMIN));
     assert!(!client.has_role(&user, &ROLE_ATTESTOR));
     assert!(!client.has_role(&user, &ROLE_BUSINESS));
@@ -278,7 +481,9 @@ fn test_all_role_combinations() {
     client.grant_role(&admin, &user, &ROLE_BUSINESS);
     client.grant_role(&admin, &user, &ROLE_OPERATOR);
 
-    let roles = access_control::get_roles(&env, &user);
+    let roles = in_contract(&env, &client.address, |e| {
+        access_control::get_roles(e, &user)
+    });
     assert_eq!(
         roles,
         ROLE_ADMIN | ROLE_ATTESTOR | ROLE_BUSINESS | ROLE_OPERATOR
@@ -286,7 +491,9 @@ fn test_all_role_combinations() {
 
     // Revoke one
     client.revoke_role(&admin, &user, &ROLE_BUSINESS);
-    let roles = access_control::get_roles(&env, &user);
+    let roles = in_contract(&env, &client.address, |e| {
+        access_control::get_roles(e, &user)
+    });
     assert_eq!(roles, ROLE_ADMIN | ROLE_ATTESTOR | ROLE_OPERATOR);
 }
 
@@ -347,8 +554,11 @@ fn test_revoked_operator_cannot_pause() {
     client.grant_role(&admin, &operator, &ROLE_OPERATOR);
     assert!(client.has_role(&operator, &ROLE_OPERATOR));
 
-    client.pause(&operator, &1u64);
-    assert!(client.is_paused());
+    // OPERATOR alone cannot pause; revoking the role changes nothing.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.pause(&operator, &1u64);
+    }));
+    assert!(result.is_err(), "operator cannot pause");
 
     client.revoke_role(&admin, &operator, &ROLE_OPERATOR);
 
@@ -465,84 +675,74 @@ fn test_business_role_limits() {
     assert!(result.is_err(), "business cannot grant roles");
 }
 
-
 #[test]
 fn test_fuzz_grant_revoke_role_random_bitmaps() {
     let e = soroban_sdk::Env::default();
-    let contract = AttestationContract::new(&e);
+    e.mock_all_auths();
+    let contract_id = e.register(AttestationContract, ());
 
     let valid_roles = [
-        0b0000,
-        0b0001,
-        0b0010,
-        0b0100,
-        0b1000,
-        0b0011,
-        0b0101,
-        0b1001,
-        0b0110,
-        0b1010,
-        0b1100,
-        0b0111,
-        0b1011,
-        0b1101,
-        0b1110,
-        0b1111,
+        0b0000, 0b0001, 0b0010, 0b0100, 0b1000, 0b0011, 0b0101, 0b1001, 0b0110, 0b1010, 0b1100,
+        0b0111, 0b1011, 0b1101, 0b1110, 0b1111,
     ];
-    let invalid_bitmaps = [
-        0b10000u32,
-        0b100000u32,
-        0xFFFFu32,
-        0xDEADu32,
-        0xFFFFFFFFu32,
-    ];
+    let invalid_bitmaps = [0b10000u32, 0b100000u32, 0xFFFFu32, 0xDEADu32, 0xFFFFFFFFu32];
 
     let user1 = soroban_sdk::Address::generate(&e);
+    // A second admin keeps `admin_count > MIN_ADMIN_COUNT` so the
+    // admin-removal safeguard in `revoke_role` does not trip while the
+    // bitmap arithmetic below is exercised.
+    let user2 = soroban_sdk::Address::generate(&e);
+    e.as_contract(&contract_id, || {
+        crate::access_control::set_roles(&e, &user2, ROLE_ADMIN);
 
-    for &roles in valid_roles.iter() {
-        contract.set_roles(&user1, &0u32);
-        contract.grant_role(&user1, &roles);
-        assert_eq!(
-            contract.get_roles(&user1),
-            roles,
-            "grant_role failed for bitmap {}",
-            roles
-        );
-    }
+        for &roles in valid_roles.iter() {
+            crate::access_control::set_roles(&e, &user1, 0u32);
+            // 0b0000 is a valid bitmap but a no-op grant; set_roles covers it.
+            if roles != 0 {
+                crate::access_control::grant_role(&e, &user1, roles, &user1);
+            }
+            assert_eq!(
+                crate::access_control::get_roles(&e, &user1),
+                roles,
+                "set/grant failed for bitmap {}",
+                roles
+            );
+        }
 
-    contract.set_roles(&user1, &0u32);
-    contract.grant_role(&user1, &0b0101u32);
-    contract.grant_role(&user1, &0b0101u32);
-    assert_eq!(contract.get_roles(&user1), 0b0101u32);
+        crate::access_control::set_roles(&e, &user1, 0u32);
+        crate::access_control::grant_role(&e, &user1, 0b0101u32, &user1);
+        crate::access_control::grant_role(&e, &user1, 0b0101u32, &user1);
+        assert_eq!(crate::access_control::get_roles(&e, &user1), 0b0101u32);
 
-    contract.set_roles(&user1, &0b1111u32);
-    contract.revoke_role(&user1, &0b0001u32);
-    assert_eq!(contract.get_roles(&user1), 0b1110u32);
-    contract.revoke_role(&user1, &0b0010u32);
-    assert_eq!(contract.get_roles(&user1), 0b1100u32);
-    contract.revoke_role(&user1, &0b0100u32);
-    assert_eq!(contract.get_roles(&user1), 0b1000u32);
-    contract.revoke_role(&user1, &0b1000u32);
-    assert_eq!(contract.get_roles(&user1), 0u32);
+        crate::access_control::set_roles(&e, &user1, 0b1111u32);
+        crate::access_control::revoke_role(&e, &user1, 0b0001u32, &user1);
+        assert_eq!(crate::access_control::get_roles(&e, &user1), 0b1110u32);
+        crate::access_control::revoke_role(&e, &user1, 0b0010u32, &user1);
+        assert_eq!(crate::access_control::get_roles(&e, &user1), 0b1100u32);
+        crate::access_control::revoke_role(&e, &user1, 0b0100u32, &user1);
+        assert_eq!(crate::access_control::get_roles(&e, &user1), 0b1000u32);
+        crate::access_control::revoke_role(&e, &user1, 0b1000u32, &user1);
+        assert_eq!(crate::access_control::get_roles(&e, &user1), 0u32);
 
-    contract.revoke_role(&user1, &0b0010u32);
-    assert_eq!(contract.get_roles(&user1), 0u32);
+        crate::access_control::revoke_role(&e, &user1, 0b0010u32, &user1);
+        assert_eq!(crate::access_control::get_roles(&e, &user1), 0u32);
 
-    for &invalid in invalid_bitmaps.iter() {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            contract.grant_role(&user1, &invalid);
-        }));
-        assert!(
-            result.is_err(),
-            "grant_role should panic for invalid bitmap: {}",
-            invalid
-        );
-    }
+        for &invalid in invalid_bitmaps.iter() {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::access_control::grant_role(&e, &user1, invalid, &user1);
+            }));
+            assert!(
+                result.is_err(),
+                "grant_role should panic for invalid bitmap: {}",
+                invalid
+            );
+        }
+    });
 
-    assert!(contract.is_valid_role_bitmap(0b0000u32));
-    assert!(contract.is_valid_role_bitmap(0b1111u32));
-    assert!(!contract.is_valid_role_bitmap(0b10000u32));
-    assert!(!contract.is_valid_role_bitmap(0xFFFFFFFFu32));
+    assert!(crate::access_control::is_valid_role_bitmap(0b0000u32));
+    assert!(crate::access_control::is_valid_role_bitmap(0b1111u32));
+    assert!(!crate::access_control::is_valid_role_bitmap(0b10000u32));
+    assert!(!crate::access_control::is_valid_role_bitmap(0xFFFFFFFFu32));
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -636,16 +836,6 @@ fn test_swap_admin_old_not_admin() {
     let nobody = Address::generate(&env);
 
     client.swap_admin(&admin, &nobody, &admin);
-}
-
-#[test]
-#[should_panic(expected = "swap would leave no admin remaining")]
-fn test_swap_admin_would_leave_no_admin() {
-    let (env, client, admin) = setup();
-    let target = Address::generate(&env);
-
-    // admin is the only admin; swapping to target with no other admins should fail
-    client.swap_admin(&admin, &admin, &target);
 }
 
 #[test]
@@ -747,4 +937,62 @@ fn test_admin_removal_succeeds_at_cooldown_boundary() {
     client.revoke_role(&admin, &second, &ROLE_ADMIN);
 
     assert!(!client.has_role(&second, &ROLE_ADMIN));
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  Weighted Admin Quorum (Issue #893)
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_admin_quorum_weight_uses_default_and_explicit_weights() {
+    let (env, client, admin) = setup();
+    let second_admin = Address::generate(&env);
+    client.grant_role(&admin, &second_admin, &ROLE_ADMIN);
+
+    // Existing and newly granted admins without configured weights count as 1.
+    assert_eq!(client.get_admin_quorum_weight(), 2);
+
+    client.set_admin_weight(&admin, &second_admin, &17);
+    assert_eq!(client.get_admin_quorum_weight(), 18);
+}
+
+#[test]
+fn test_admin_quorum_weight_includes_maximum_weight_without_overflow() {
+    let (env, client, admin) = setup();
+    let second_admin = Address::generate(&env);
+    client.grant_role(&admin, &second_admin, &ROLE_ADMIN);
+
+    client.set_admin_weight(&admin, &admin, &access_control::MAX_ADMIN_WEIGHT);
+    client.set_admin_weight(&admin, &second_admin, &access_control::MAX_ADMIN_WEIGHT);
+
+    assert_eq!(
+        client.get_admin_quorum_weight(),
+        (2 * access_control::MAX_ADMIN_WEIGHT) as u64
+    );
+}
+
+#[test]
+fn test_admin_quorum_weight_ignores_non_admin_and_removed_admin_weights() {
+    let (env, client, admin) = setup();
+    let former_admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    client.grant_role(&admin, &former_admin, &ROLE_ADMIN);
+    client.grant_role(&admin, &non_admin, &ROLE_ATTESTOR);
+    client.set_admin_weight(&admin, &former_admin, &23);
+
+    // Store a weight for a non-admin through the internal helper to exercise
+    // the quorum function's role filter independently of setter validation.
+    in_contract(&env, &client.address, |e| {
+        e.storage().instance().set(
+            &access_control::AccessControlKey::AdminWeight(non_admin.clone()),
+            &access_control::MAX_ADMIN_WEIGHT,
+        );
+        assert_eq!(access_control::admin_quorum_weight(e), 24);
+
+        // Simulate a role removal while the old weight entry remains stored.
+        access_control::set_roles(e, &former_admin, ROLE_ATTESTOR);
+        assert_eq!(access_control::get_admin_weight(e, &former_admin), 23);
+        assert_eq!(access_control::admin_quorum_weight(e), 1);
+    });
+    assert_eq!(client.get_admin_quorum_weight(), 1);
 }

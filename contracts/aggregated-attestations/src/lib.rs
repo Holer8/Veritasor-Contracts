@@ -29,12 +29,20 @@ use core::cmp::Ordering;
 use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Vec};
 
 #[cfg(test)]
+mod activate_admin_test;
+#[cfg(test)]
+mod admin_rotation_test;
+#[cfg(test)]
 mod event_ingestion_test;
+#[cfg(test)]
+mod initialize_test;
 
-use veritasor_common::replay_protection;
+use veritasor_common::{governance_gating, replay_protection};
 
 /// Admin replay channel (shared across `initialize` and `register_portfolio`).
 pub const NONCE_CHANNEL_ADMIN: u32 = 1;
+/// Channel for time-locked admin operations.
+pub const NONCE_CHANNEL_ADMIN_ROTATION: u32 = 256;
 
 /// Maximum businesses per portfolio (gas / cross-call bound).
 pub const MAX_PORTFOLIO_BUSINESSES: u32 = 200;
@@ -463,6 +471,28 @@ impl AggregatedAttestationsContract {
         admin
     }
 
+    /// Propose a new admin address for a time-locked rotation.
+    pub fn set_pending_admin(env: Env, caller: Address, nonce: u64, admin: Address, delay: u64) {
+        Self::require_admin(&env, &caller);
+        replay_protection::verify_and_increment_nonce(
+            &env,
+            &caller,
+            NONCE_CHANNEL_ADMIN_ROTATION,
+            nonce,
+        );
+        governance_gating::set_pending_admin(&env, admin, delay);
+    }
+
+    /// Activate a pending admin if the time-lock has expired.
+    pub fn activate_admin(env: Env) {
+        if let Some(new_admin) = governance_gating::get_active_pending_admin(&env) {
+            env.storage().instance().set(&DataKey::Admin, &new_admin);
+            governance_gating::clear_pending_admin(&env);
+        } else {
+            panic!("time-lock not expired or no pending admin");
+        }
+    }
+
     fn assert_portfolio_id_within_limit(portfolio_id: &String) {
         assert!(
             portfolio_id.len() <= MAX_PORTFOLIO_ID_BYTES,
@@ -483,5 +513,48 @@ impl AggregatedAttestationsContract {
                 assert!(a != b, "duplicate business in portfolio");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod get_max_portfolio_businesses_test {
+    extern crate std;
+
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn returns_limit_without_initialization_or_authorization() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, AggregatedAttestationsContract);
+        let client = AggregatedAttestationsContractClient::new(&env, &contract_id);
+
+        assert_eq!(
+            client.get_max_portfolio_businesses(),
+            MAX_PORTFOLIO_BUSINESSES
+        );
+    }
+
+    #[test]
+    fn returns_limit_without_changing_initialized_contract_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, AggregatedAttestationsContract);
+        let client = AggregatedAttestationsContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let portfolio_id = String::from_str(&env, "portfolio");
+        let businesses = Vec::from_array(&env, [Address::generate(&env), Address::generate(&env)]);
+
+        client.initialize(&admin, &0u64);
+        client.register_portfolio(&admin, &1u64, &portfolio_id, &businesses);
+        let admin_before = client.get_admin();
+        let portfolio_before = client.get_portfolio(&portfolio_id);
+
+        assert_eq!(
+            client.get_max_portfolio_businesses(),
+            MAX_PORTFOLIO_BUSINESSES
+        );
+        assert_eq!(client.get_admin(), admin_before);
+        assert_eq!(client.get_portfolio(&portfolio_id), portfolio_before);
     }
 }

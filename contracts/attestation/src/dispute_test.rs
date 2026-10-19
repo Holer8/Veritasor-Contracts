@@ -1,6 +1,6 @@
 use super::dispute::{DisputeOutcome, DisputeStatus, DisputeType, OptionalResolution};
 use super::*;
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{Address, BytesN, Env, String};
 
 /// Custom deadline of 1 hour for tests that need short deadlines.
@@ -685,13 +685,21 @@ fn test_check_and_rollback_disputes_before_deadline() {
     let period = String::from_str(&env, "2026-02");
     let root = BytesN::from_array(&env, &[1u8; 32]);
     client.submit_attestation(
-        &business, &period, &root,
-        &1700000000u64, &1u32, &0i128, &None, &None,
+        &business,
+        &period,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
     let challenger = Address::generate(&env);
     let dispute_id = client.open_dispute(
-        &challenger, &business, &period,
+        &challenger,
+        &business,
+        &period,
         &DisputeType::RevenueMismatch,
         &String::from_str(&env, "Test dispute"),
     );
@@ -699,7 +707,10 @@ fn test_check_and_rollback_disputes_before_deadline() {
     // Current time is right after dispute creation — not past deadline
     let dispute_ids = soroban_sdk::vec![&env, dispute_id];
     let count = client.check_and_rollback_disputes(&admin, &dispute_ids, &10u32);
-    assert_eq!(count, 0, "no disputes should be rolled back before deadline");
+    assert_eq!(
+        count, 0,
+        "no disputes should be rolled back before deadline"
+    );
 
     // Verify the dispute is still Open
     let dispute = client.get_dispute(&dispute_id).unwrap();
@@ -718,13 +729,21 @@ fn test_check_and_rollback_disputes_after_deadline() {
     let period = String::from_str(&env, "2026-02");
     let root = BytesN::from_array(&env, &[1u8; 32]);
     client.submit_attestation(
-        &business, &period, &root,
-        &1700000000u64, &1u32, &0i128, &None, &None,
+        &business,
+        &period,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
     let challenger = Address::generate(&env);
     let dispute_id = client.open_dispute(
-        &challenger, &business, &period,
+        &challenger,
+        &business,
+        &period,
         &DisputeType::RevenueMismatch,
         &String::from_str(&env, "Test dispute"),
     );
@@ -746,7 +765,10 @@ fn test_check_and_rollback_disputes_after_deadline() {
         assert_eq!(resolution.outcome, DisputeOutcome::Rejected);
         assert_eq!(
             resolution.notes,
-            String::from_str(&env, "Automatic rollback: dispute resolution deadline exceeded")
+            String::from_str(
+                &env,
+                "Automatic rollback: dispute resolution deadline exceeded"
+            )
         );
         assert_eq!(resolution.timestamp, now + 3601);
     } else {
@@ -765,13 +787,21 @@ fn test_check_and_rollback_disputes_resolved_skipped() {
     let period = String::from_str(&env, "2026-02");
     let root = BytesN::from_array(&env, &[1u8; 32]);
     client.submit_attestation(
-        &business, &period, &root,
-        &1700000000u64, &1u32, &0i128, &None, &None,
+        &business,
+        &period,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
     let challenger = Address::generate(&env);
     let dispute_id = client.open_dispute(
-        &challenger, &business, &period,
+        &challenger,
+        &business,
+        &period,
         &DisputeType::RevenueMismatch,
         &String::from_str(&env, "Test dispute"),
     );
@@ -779,7 +809,8 @@ fn test_check_and_rollback_disputes_resolved_skipped() {
     // Resolve the dispute normally
     let resolver = Address::generate(&env);
     client.resolve_dispute(
-        &dispute_id, &resolver,
+        &dispute_id,
+        &resolver,
         &DisputeOutcome::Upheld,
         &String::from_str(&env, "Resolved on time"),
     );
@@ -809,24 +840,40 @@ fn test_check_and_rollback_disputes_limit() {
     let business2 = Address::generate(&env);
     let period = String::from_str(&env, "2026-02");
     let root = BytesN::from_array(&env, &[1u8; 32]);
-    
+
     client.submit_attestation(
-        &business1, &period, &root,
-        &1700000000u64, &1u32, &0i128, &None, &None,
+        &business1,
+        &period,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
     client.submit_attestation(
-        &business2, &period, &root,
-        &1700000000u64, &1u32, &0i128, &None, &None,
+        &business2,
+        &period,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
     let challenger = Address::generate(&env);
     let dispute_id1 = client.open_dispute(
-        &challenger, &business1, &period,
+        &challenger,
+        &business1,
+        &period,
         &DisputeType::RevenueMismatch,
         &String::from_str(&env, "Dispute 1"),
     );
     let dispute_id2 = client.open_dispute(
-        &challenger, &business2, &period,
+        &challenger,
+        &business2,
+        &period,
         &DisputeType::DataIntegrity,
         &String::from_str(&env, "Dispute 2"),
     );
@@ -838,7 +885,10 @@ fn test_check_and_rollback_disputes_limit() {
     // With limit=1, only one dispute should be rolled back
     let dispute_ids = soroban_sdk::vec![&env, dispute_id1, dispute_id2];
     let count = client.check_and_rollback_disputes(&admin, &dispute_ids, &1u32);
-    assert_eq!(count, 1, "only one dispute should be rolled back due to limit");
+    assert_eq!(
+        count, 1,
+        "only one dispute should be rolled back due to limit"
+    );
 
     // Second call with limit=1 rolls back the other
     let count2 = client.check_and_rollback_disputes(&admin, &dispute_ids, &1u32);
@@ -884,13 +934,21 @@ fn test_check_and_rollback_disputes_exact_at_deadline_boundary() {
     let period = String::from_str(&env, "2026-02");
     let root = BytesN::from_array(&env, &[1u8; 32]);
     client.submit_attestation(
-        &business, &period, &root,
-        &1700000000u64, &1u32, &0i128, &None, &None,
+        &business,
+        &period,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
     let challenger = Address::generate(&env);
     let dispute_id = client.open_dispute(
-        &challenger, &business, &period,
+        &challenger,
+        &business,
+        &period,
         &DisputeType::RevenueMismatch,
         &String::from_str(&env, "Test dispute"),
     );
@@ -922,15 +980,23 @@ fn test_check_and_rollback_disputes_basic_closure() {
     let business = Address::generate(&env);
     let period = String::from_str(&env, "2026-02");
     let root = BytesN::from_array(&env, &[1u8; 32]);
-    
+
     client.submit_attestation(
-        &business, &period, &root,
-        &1700000000u64, &1u32, &0i128, &None, &None,
+        &business,
+        &period,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
     let challenger = Address::generate(&env);
     let dispute_id = client.open_dispute(
-        &challenger, &business, &period,
+        &challenger,
+        &business,
+        &period,
         &DisputeType::RevenueMismatch,
         &String::from_str(&env, "Test dispute"),
     );
@@ -947,7 +1013,7 @@ fn test_check_and_rollback_disputes_basic_closure() {
     // Verify dispute is closed with rollback resolution
     let dispute = client.get_dispute(&dispute_id).unwrap();
     assert_eq!(dispute.status, DisputeStatus::Closed);
-    
+
     // Note: attestor unlock is tested implicitly here. When no attestor lock
     // exists, unlock_attestor is a safe no-op. Full attestor unlock testing
     // requires the attestor staking contract setup which is done in the
@@ -963,43 +1029,67 @@ fn test_check_and_rollback_disputes_multiple_with_mixed_statuses() {
 
     // Create 3 attestations with different business/period combos
     let root = BytesN::from_array(&env, &[1u8; 32]);
-    
+
     let business1 = Address::generate(&env);
     let period1 = String::from_str(&env, "2026-01");
     client.submit_attestation(
-        &business1, &period1, &root,
-        &1700000000u64, &1u32, &0i128, &None, &None,
+        &business1,
+        &period1,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
     let business2 = Address::generate(&env);
     let period2 = String::from_str(&env, "2026-02");
     client.submit_attestation(
-        &business2, &period2, &root,
-        &1700000000u64, &1u32, &0i128, &None, &None,
+        &business2,
+        &period2,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
     let business3 = Address::generate(&env);
     let period3 = String::from_str(&env, "2026-03");
     client.submit_attestation(
-        &business3, &period3, &root,
-        &1700000000u64, &1u32, &0i128, &None, &None,
+        &business3,
+        &period3,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
     let challenger = Address::generate(&env);
-    
+
     // Open 3 disputes
     let dispute_id1 = client.open_dispute(
-        &challenger, &business1, &period1,
+        &challenger,
+        &business1,
+        &period1,
         &DisputeType::RevenueMismatch,
         &String::from_str(&env, "Dispute 1"),
     );
     let dispute_id2 = client.open_dispute(
-        &challenger, &business2, &period2,
+        &challenger,
+        &business2,
+        &period2,
         &DisputeType::DataIntegrity,
         &String::from_str(&env, "Dispute 2"),
     );
     let dispute_id3 = client.open_dispute(
-        &challenger, &business3, &period3,
+        &challenger,
+        &business3,
+        &period3,
         &DisputeType::Other,
         &String::from_str(&env, "Dispute 3"),
     );
@@ -1007,7 +1097,8 @@ fn test_check_and_rollback_disputes_multiple_with_mixed_statuses() {
     // Resolve dispute 2 normally
     let resolver = Address::generate(&env);
     client.resolve_dispute(
-        &dispute_id2, &resolver,
+        &dispute_id2,
+        &resolver,
         &DisputeOutcome::Upheld,
         &String::from_str(&env, "Resolved on time"),
     );
@@ -1022,11 +1113,23 @@ fn test_check_and_rollback_disputes_multiple_with_mixed_statuses() {
     // Only dispute 1 (Open + past deadline) should be rolled back
     let dispute_ids = soroban_sdk::vec![&env, dispute_id1, dispute_id2, dispute_id3];
     let count = client.check_and_rollback_disputes(&admin, &dispute_ids, &10u32);
-    assert_eq!(count, 1, "only the open dispute past deadline should roll back");
+    assert_eq!(
+        count, 1,
+        "only the open dispute past deadline should roll back"
+    );
 
-    assert_eq!(client.get_dispute(&dispute_id1).unwrap().status, DisputeStatus::Closed);
-    assert_eq!(client.get_dispute(&dispute_id2).unwrap().status, DisputeStatus::Resolved);
-    assert_eq!(client.get_dispute(&dispute_id3).unwrap().status, DisputeStatus::Closed);
+    assert_eq!(
+        client.get_dispute(&dispute_id1).unwrap().status,
+        DisputeStatus::Closed
+    );
+    assert_eq!(
+        client.get_dispute(&dispute_id2).unwrap().status,
+        DisputeStatus::Resolved
+    );
+    assert_eq!(
+        client.get_dispute(&dispute_id3).unwrap().status,
+        DisputeStatus::Closed
+    );
 }
 
 #[test]
@@ -1072,3 +1175,352 @@ fn test_submit_dispute_witness_dispute_not_open_rejected() {
     assert!(res.is_err());
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  Adversarial coverage: dispute::set_revoked_periods
+//
+//  `set_revoked_periods` is the single raw writer for the per-business
+//  revocation index.  These tests pin down its contract:
+//   * non-empty vectors are stored verbatim (order preserved, no dedup),
+//   * an empty vector *removes* the index entry,
+//   * the index is scoped per business,
+//   * resetting the index never mutates the authoritative `Revoked` record,
+//   * the revoke / cleanup call sites keep the index consistent with storage.
+// ════════════════════════════════════════════════════════════════════
+
+/// Build a soroban `Vec<String>` from string literals.
+fn period_vec(env: &Env, items: &[&str]) -> soroban_sdk::Vec<String> {
+    let mut out = soroban_sdk::Vec::new(env);
+    for item in items.iter() {
+        out.push_back(String::from_str(env, item));
+    }
+    out
+}
+
+/// Submit an attestation so later revocations have a target.
+fn submit(
+    env: &Env,
+    client: &AttestationContractClient<'static>,
+    business: &Address,
+    period: &str,
+) {
+    client.submit_attestation(
+        business,
+        &String::from_str(env, period),
+        &BytesN::from_array(env, &[7u8; 32]),
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
+    );
+}
+
+#[test]
+fn set_revoked_periods_stores_non_empty_index_in_order() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    let seeded = period_vec(&env, &["2026-03", "2026-01", "2026-02"]);
+    dispute::set_revoked_periods(&env, &business, &seeded);
+
+    let read = client.get_revoked_periods(&business);
+    assert_eq!(read.len(), 3);
+    assert_eq!(read.get(0).unwrap(), String::from_str(&env, "2026-03"));
+    assert_eq!(read.get(1).unwrap(), String::from_str(&env, "2026-01"));
+    assert_eq!(read.get(2).unwrap(), String::from_str(&env, "2026-02"));
+}
+
+#[test]
+fn set_revoked_periods_empty_vector_clears_and_is_idempotent() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    dispute::set_revoked_periods(&env, &business, &period_vec(&env, &["2026-01"]));
+    assert_eq!(client.get_revoked_periods(&business).len(), 1);
+
+    let empty = soroban_sdk::Vec::<String>::new(&env);
+    dispute::set_revoked_periods(&env, &business, &empty);
+
+    // Clearing twice must be a stable no-op (no phantom entry is left behind).
+    dispute::set_revoked_periods(&env, &business, &empty);
+    assert_eq!(client.get_revoked_periods(&business).len(), 0);
+
+    // A cleared index is what `cleanup_revocation_index` reports as clean.
+    assert_eq!(client.cleanup_revocation_index(&business), 0);
+}
+
+#[test]
+fn set_revoked_periods_clear_then_repopulate_leaves_no_residue() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    dispute::set_revoked_periods(&env, &business, &period_vec(&env, &["2026-01", "2026-02"]));
+    dispute::set_revoked_periods(&env, &business, &soroban_sdk::Vec::<String>::new(&env));
+    dispute::set_revoked_periods(&env, &business, &period_vec(&env, &["2026-09"]));
+
+    let read = client.get_revoked_periods(&business);
+    assert_eq!(
+        read.len(),
+        1,
+        "cleared entries must not survive a repopulate"
+    );
+    assert_eq!(read.get(0).unwrap(), String::from_str(&env, "2026-09"));
+}
+
+#[test]
+fn set_revoked_periods_is_scoped_per_business() {
+    let (env, client) = setup();
+    let biz_a = Address::generate(&env);
+    let biz_b = Address::generate(&env);
+
+    dispute::set_revoked_periods(&env, &biz_a, &period_vec(&env, &["2026-01"]));
+    assert_eq!(client.get_revoked_periods(&biz_b).len(), 0);
+
+    dispute::set_revoked_periods(&env, &biz_b, &period_vec(&env, &["2026-02", "2026-03"]));
+    assert_eq!(client.get_revoked_periods(&biz_a).len(), 1);
+    assert_eq!(client.get_revoked_periods(&biz_b).len(), 2);
+
+    // Clearing A must not touch B.
+    dispute::set_revoked_periods(&env, &biz_a, &soroban_sdk::Vec::<String>::new(&env));
+    assert_eq!(client.get_revoked_periods(&biz_a).len(), 0);
+    assert_eq!(client.get_revoked_periods(&biz_b).len(), 2);
+}
+
+#[test]
+fn set_revoked_periods_is_raw_and_does_not_deduplicate() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-01");
+    submit(&env, &client, &business, "2026-01");
+
+    client.revoke_attestation(
+        &business,
+        &business,
+        &period,
+        &String::from_str(&env, "duplicate index probe"),
+        &0u64,
+    );
+
+    // The setter stores exactly what it is handed; de-duplication is the
+    // revocation path's job (see the idempotency guard asserted below).
+    dispute::set_revoked_periods(&env, &business, &period_vec(&env, &["2026-01", "2026-01"]));
+    assert_eq!(client.get_revoked_periods(&business).len(), 2);
+}
+
+#[test]
+fn revocation_path_never_double_appends_the_index() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-01");
+    submit(&env, &client, &business, "2026-01");
+
+    client.revoke_attestation(
+        &business,
+        &business,
+        &period,
+        &String::from_str(&env, "first"),
+        &0u64,
+    );
+    assert_eq!(client.get_revoked_periods(&business).len(), 1);
+
+    // The replay is rejected before the append, so the index cannot grow.
+    let replay = client.try_revoke_attestation(
+        &business,
+        &business,
+        &period,
+        &String::from_str(&env, "replay"),
+        &0u64,
+    );
+    assert!(replay.is_err(), "double revocation must be rejected");
+    assert_eq!(client.get_revoked_periods(&business).len(), 1);
+}
+
+#[test]
+fn set_revoked_periods_does_not_change_authoritative_revocation_state() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-01");
+    submit(&env, &client, &business, "2026-01");
+
+    client.revoke_attestation(
+        &business,
+        &business,
+        &period,
+        &String::from_str(&env, "authoritative"),
+        &0u64,
+    );
+    assert!(client.is_revoked(&business, &period));
+    let info_before = client.get_revocation_info(&business, &period).unwrap();
+    assert_eq!(client.get_revoked_periods(&business).len(), 1);
+
+    // Wiping the secondary index must not "un-revoke" the attestation.
+    dispute::set_revoked_periods(&env, &business, &soroban_sdk::Vec::<String>::new(&env));
+
+    assert!(
+        client.is_revoked(&business, &period),
+        "is_attestation_revoked is authoritative and must ignore the index"
+    );
+    assert_eq!(
+        client.get_revocation_info(&business, &period).unwrap(),
+        info_before
+    );
+    assert_eq!(client.get_revoked_periods(&business).len(), 0);
+
+    // Disputes remain blocked on the still-revoked attestation.
+    let challenger = Address::generate(&env);
+    let dispute = client.try_open_dispute(
+        &challenger,
+        &business,
+        &period,
+        &DisputeType::RevenueMismatch,
+        &String::from_str(&env, "revoked attestation"),
+    );
+    assert!(dispute.is_err(), "revoked attestations cannot be disputed");
+}
+
+#[test]
+fn cleanup_revocation_index_prunes_phantom_entries_through_the_setter() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+    let live = String::from_str(&env, "2026-01");
+    submit(&env, &client, &business, "2026-01");
+
+    client.revoke_attestation(
+        &business,
+        &business,
+        &live,
+        &String::from_str(&env, "live revocation"),
+        &0u64,
+    );
+
+    // Inject a phantom entry: no attestation exists for this period, so the
+    // cleanup path must prune it and write back the surviving list.
+    dispute::set_revoked_periods(&env, &business, &period_vec(&env, &["2026-01", "2099-99"]));
+    assert_eq!(client.get_revoked_periods(&business).len(), 2);
+
+    let cleaned = client.cleanup_revocation_index(&business);
+    assert_eq!(cleaned, 1, "exactly the phantom entry must be pruned");
+
+    let remaining = client.get_revoked_periods(&business);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining.get(0).unwrap(), live);
+
+    // Nothing left to clean.
+    assert_eq!(client.cleanup_revocation_index(&business), 0);
+}
+
+#[test]
+fn cleanup_revocation_index_clears_index_when_every_entry_is_a_phantom() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    // No attestations were ever submitted for these periods.
+    dispute::set_revoked_periods(&env, &business, &period_vec(&env, &["2099-99", "2099-98"]));
+
+    let cleaned = client.cleanup_revocation_index(&business);
+    assert_eq!(cleaned, 2);
+    assert_eq!(
+        client.get_revoked_periods(&business).len(),
+        0,
+        "an all-phantom index must collapse to an empty index"
+    );
+
+    // Idempotent: the index is gone, so a second pass is a no-op.
+    assert_eq!(client.cleanup_revocation_index(&business), 0);
+}
+
+#[test]
+fn cleanup_revocation_index_is_a_noop_for_unknown_business() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    assert_eq!(client.cleanup_revocation_index(&business), 0);
+    assert_eq!(client.get_revoked_periods(&business).len(), 0);
+}
+
+#[test]
+fn revoke_and_cleanup_empties_the_index_for_the_last_period() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-01");
+    submit(&env, &client, &business, "2026-01");
+
+    client.revoke_and_cleanup(
+        &business,
+        &business,
+        &period,
+        &String::from_str(&env, "revoke and purge"),
+        &0u64,
+    );
+
+    assert!(client.is_revoked(&business, &period));
+    assert!(
+        client.get_attestation(&business, &period).is_none(),
+        "revoke_and_cleanup must purge active attestation storage"
+    );
+    assert_eq!(
+        client.get_revoked_periods(&business).len(),
+        0,
+        "the cleaned-up period must be dropped from the index"
+    );
+}
+
+#[test]
+fn revoke_and_cleanup_keeps_other_revoked_periods_in_the_index() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+    let keep = String::from_str(&env, "2026-01");
+    let purge = String::from_str(&env, "2026-02");
+    submit(&env, &client, &business, "2026-01");
+    submit(&env, &client, &business, "2026-02");
+
+    client.revoke_attestation(
+        &business,
+        &business,
+        &keep,
+        &String::from_str(&env, "keep"),
+        &0u64,
+    );
+    client.revoke_attestation(
+        &business,
+        &business,
+        &purge,
+        &String::from_str(&env, "purge"),
+        &0u64,
+    );
+    assert_eq!(client.get_revoked_periods(&business).len(), 2);
+
+    client.revoke_and_cleanup(
+        &business,
+        &business,
+        &purge,
+        &String::from_str(&env, "purge"),
+        &0u64,
+    );
+
+    let remaining = client.get_revoked_periods(&business);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining.get(0).unwrap(), keep);
+    assert!(client.is_revoked(&business, &keep));
+}
+
+#[test]
+fn set_revoked_periods_round_trips_a_large_index() {
+    let (env, client) = setup();
+    let business = Address::generate(&env);
+
+    let items: [&str; 24] = [
+        "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08",
+        "2026-09", "2026-10", "2026-11", "2026-12", "2027-01", "2027-02", "2027-03", "2027-04",
+        "2027-05", "2027-06", "2027-07", "2027-08", "2027-09", "2027-10", "2027-11", "2027-12",
+    ];
+
+    dispute::set_revoked_periods(&env, &business, &period_vec(&env, &items));
+    let read = client.get_revoked_periods(&business);
+    assert_eq!(read.len(), 24);
+    assert_eq!(read.get(0).unwrap(), String::from_str(&env, "2026-01"));
+    assert_eq!(read.get(23).unwrap(), String::from_str(&env, "2027-12"));
+
+    dispute::set_revoked_periods(&env, &business, &soroban_sdk::Vec::<String>::new(&env));
+    assert_eq!(client.get_revoked_periods(&business).len(), 0);
+}

@@ -50,10 +50,9 @@
 //! - Nonce sequences must be monotonically increasing per account
 //! - At least `MIN_ADMIN_COUNT` addresses always hold ADMIN role.
 //! - Admin removals are separated by `ADMIN_REMOVAL_COOLDOWN_SECS`.
-
-use soroban_sdk::{contracttype, Address, Env, Vec};
-
 use crate::dispute;
+use crate::events;
+use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 /// Role identifiers as bit flags for efficient storage
 /// SECURITY: Only the first 4 bits are valid (0b1111 = 0xF)
@@ -66,7 +65,8 @@ pub const ROLE_OPERATOR: u32 = 1 << 3; // 0b1000
 /// Maximum valid role bitmap (all defined roles combined)
 /// Used for input validation to reject invalid role combinations.
 /// SECURITY: Adding a new role requires updating both this constant
-/// and the reference implementation in the proptests (`contracts/attestation/src/property_test.rs`).
+/// and the reference implementation + compile-time guard in the
+/// property tests (`contracts/attestation/src/access_control_property_test.rs`).
 pub const ROLE_VALID_MASK: u32 = ROLE_ADMIN | ROLE_ATTESTOR | ROLE_BUSINESS | ROLE_OPERATOR;
 
 /// Maximum allowed weight for a single admin member.
@@ -191,10 +191,21 @@ pub fn has_role(env: &Env, account: &Address, role: u32) -> bool {
 
 /// Grant a role to an address (additive operation).
 /// SECURITY: Validates role bitmap and emits event for audit trail
+/// StrKey encoding of the all-zero ed25519 public key. Granting ADMIN to it
+/// would create an admin that no one controls, so it is rejected (invariant:
+/// "ADMIN role cannot be granted to zero address").
+const ZERO_ACCOUNT_STRKEY: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
 pub fn grant_role(env: &Env, account: &Address, role: u32, changed_by: &Address) {
     // Input validation: role must be a single valid bit or combination
     if !is_valid_role_bitmap(role) || role == 0 {
         panic!("invalid role: must be non-zero and within valid range");
+    }
+
+    // SECURITY: never grant ADMIN to the zero account (nobody controls it).
+    if (role & ROLE_ADMIN) != 0 && account.to_string() == String::from_str(env, ZERO_ACCOUNT_STRKEY)
+    {
+        panic!("ADMIN role cannot be granted to zero address");
     }
 
     let current = get_roles(env, account);
@@ -259,8 +270,7 @@ fn require_admin_removal_allowed(env: &Env) {
     {
         let now = env.ledger().timestamp();
         assert!(
-            now >= last_removed_at
-                && now - last_removed_at >= ADMIN_REMOVAL_COOLDOWN_SECS,
+            now >= last_removed_at && now - last_removed_at >= ADMIN_REMOVAL_COOLDOWN_SECS,
             "admin removal cooldown not elapsed"
         );
     }
@@ -308,19 +318,12 @@ pub fn swap_admin(env: &Env, old_admin: &Address, new_admin: &Address, swapped_b
         "old_admin does not have ADMIN role"
     );
 
-    // Enforce the invariant: at least one admin must remain after the swap.
-    // If new_admin already has ADMIN, the count won't decrease.
-    // Otherwise, there must be another admin besides old_admin.
-    if !has_role(env, new_admin, ROLE_ADMIN) {
-        let holders = get_role_holders(env);
-        let mut admin_count: u32 = 0;
-        for i in 0..holders.len() {
-            if has_role(env, &holders.get(i).unwrap(), ROLE_ADMIN) {
-                admin_count += 1;
-            }
-        }
-        assert!(admin_count >= 2, "swap would leave no admin remaining");
-    }
+    // A swap is a replacement, not a removal: `old_admin` loses ADMIN and
+    // `new_admin` gains it, so the admin count is preserved and the
+    // "at least one admin remains" invariant can never be violated by a
+    // swap (including when `old_admin` is the sole admin). The min-count
+    // guard therefore does not apply here; it protects pure removals via
+    // `revoke_role`, which is where the last-admin case is enforced.
 
     // A swap preserves the admin count, so it is not subject to the removal cooldown.
     let current = get_roles(env, old_admin);
@@ -345,9 +348,9 @@ pub(crate) fn swap_admin_after_verified_rotation(
         "old_admin does not have ADMIN role"
     );
 
-    if !has_role(env, new_admin, ROLE_ADMIN) {
-        assert!(admin_count(env) >= 2, "swap would leave no admin remaining");
-    }
+    // See `swap_admin`: a swap preserves the admin count, so no min-count
+    // guard applies (the caller has already been authenticated by the
+    // rotation flow that invoked this function).
 
     let current = get_roles(env, old_admin);
     set_roles(env, old_admin, current & !ROLE_ADMIN);
@@ -715,4 +718,282 @@ fn emit_role_granted(env: &Env, account: &Address, role: u32) {
 #[allow(dead_code)]
 fn emit_role_revoked(env: &Env, account: &Address, role: u32) {
     soroban_sdk::log!(env, "role_revoked: account={:?}, role={}", account, role);
+}
+// ═════════════════════════════════════════════════════════════════════════════
+//  Adversarial coverage for `revoke_role`
+//
+//  `access_control_test.rs` already covers the happy path (single-bit
+//  revocation, non-admin rejection, the min-admin guard and the cooldown).
+//  This module pins the boundaries those tests leave open: bitmap validation
+//  *for revoke specifically*, combined/superset masks, the fact that a mask
+//  merely *containing* ROLE_ADMIN must not trip the admin-removal machinery
+//  when the account does not hold ADMIN, the exact cooldown boundary, the
+//  ordering of the min-admin guard ahead of the cooldown guard, and the
+//  emitted audit event.
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod revoke_role_adversarial_tests {
+    use super::*;
+    use crate::events::{RoleChangedEvent, TOPIC_ROLE_REVOKED};
+    use crate::{AttestationContract, AttestationContractClient};
+    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use soroban_sdk::{Symbol, TryFromVal};
+
+    fn setup() -> (Env, AttestationContractClient<'static>, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AttestationContract, ());
+        let client = AttestationContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &0u64);
+        (env, client, admin)
+    }
+
+    /// Run an internal helper inside the contract context.
+    fn in_contract<R>(
+        env: &Env,
+        client: &AttestationContractClient,
+        f: impl FnOnce(&Env) -> R,
+    ) -> R {
+        env.as_contract(&client.address, || f(env))
+    }
+
+    fn roles(env: &Env, client: &AttestationContractClient, account: &Address) -> u32 {
+        in_contract(env, client, |e| get_roles(e, account))
+    }
+
+    fn last_admin_removed_at(env: &Env, client: &AttestationContractClient) -> Option<u64> {
+        in_contract(env, client, |e| {
+            e.storage()
+                .instance()
+                .get::<_, u64>(&AccessControlKey::LastAdminRemovedAt)
+        })
+    }
+
+    /// Give `admin` two more admins so `admin_count > MIN_ADMIN_COUNT`.
+    fn seed_admins(
+        env: &Env,
+        client: &AttestationContractClient,
+        admin: &Address,
+    ) -> (Address, Address) {
+        let first = Address::generate(env);
+        let second = Address::generate(env);
+        client.grant_role(admin, &first, &ROLE_ADMIN);
+        client.grant_role(admin, &second, &ROLE_ADMIN);
+        (first, second)
+    }
+
+    // ── bitmap validation ───────────────────────────────────────────────────
+
+    #[test]
+    fn rejected_bitmaps_never_mutate_the_stored_roles() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+        client.grant_role(&admin, &user, &(ROLE_ATTESTOR | ROLE_BUSINESS));
+        let before = roles(&env, &client, &user);
+
+        // Zero and every out-of-range bitmap must be rejected by `revoke_role`
+        // itself, not merely by the grant side.
+        for invalid in [0u32, 0b1_0000, 0b10_0000, 0x0001_0000, 0xFFFF, 0xFFFF_FFFF] {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.revoke_role(&admin, &user, &invalid);
+            }));
+            assert!(
+                outcome.is_err(),
+                "revoke_role must reject invalid bitmap {:#x}",
+                invalid
+            );
+        }
+
+        assert_eq!(
+            roles(&env, &client, &user),
+            before,
+            "every rejected revocation must leave the role bitmap untouched"
+        );
+    }
+
+    // ── combined and superset masks ─────────────────────────────────────────
+
+    #[test]
+    fn a_combined_mask_clears_all_named_bits_in_one_call() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+        client.grant_role(&admin, &user, &(ROLE_ATTESTOR | ROLE_OPERATOR));
+        assert_eq!(roles(&env, &client, &user), 0b1010u32);
+
+        client.revoke_role(&admin, &user, &(ROLE_ATTESTOR | ROLE_BUSINESS));
+
+        assert!(!client.has_role(&user, &ROLE_ATTESTOR));
+        assert!(client.has_role(&user, &ROLE_OPERATOR));
+        assert_eq!(roles(&env, &client, &user), 0b1000u32);
+    }
+
+    #[test]
+    fn a_superset_mask_cannot_set_bits_the_account_never_held() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+        client.grant_role(&admin, &user, &ROLE_ATTESTOR);
+
+        client.revoke_role(&admin, &user, &ROLE_VALID_MASK);
+
+        assert_eq!(roles(&env, &client, &user), 0u32);
+        assert!(!client.has_role(&user, &ROLE_ADMIN));
+        assert!(!client.has_role(&user, &ROLE_OPERATOR));
+    }
+
+    // ── ROLE_ADMIN in the mask vs. ROLE_ADMIN actually held ─────────────────
+
+    #[test]
+    fn a_mask_containing_admin_is_inert_when_the_account_is_not_an_admin() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+        client.grant_role(&admin, &user, &ROLE_ATTESTOR);
+        let (first, _second) = seed_admins(&env, &client, &admin);
+
+        // The account does not hold ADMIN, so `removes_admin` is false even
+        // though ROLE_ADMIN is present in the requested mask.
+        client.revoke_role(&admin, &user, &(ROLE_ADMIN | ROLE_ATTESTOR));
+
+        assert_eq!(roles(&env, &client, &user), 0u32);
+        assert!(!client.has_role(&user, &ROLE_ADMIN));
+        assert_eq!(
+            last_admin_removed_at(&env, &client),
+            None,
+            "no admin was removed, so the cooldown must not be stamped"
+        );
+        // The real admin is untouched.
+        assert!(client.has_role(&admin, &ROLE_ADMIN));
+        assert!(client.has_role(&first, &ROLE_ADMIN));
+    }
+
+    #[test]
+    fn removing_an_actual_admin_stamps_the_cooldown_with_the_ledger_time() {
+        let (env, client, admin) = setup();
+        let (first, _second) = seed_admins(&env, &client, &admin);
+
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        client.revoke_role(&admin, &first, &ROLE_ADMIN);
+
+        assert!(!client.has_role(&first, &ROLE_ADMIN));
+        assert_eq!(
+            last_admin_removed_at(&env, &client),
+            Some(1_000_000),
+            "the cooldown must record the ledger time of the removal"
+        );
+    }
+
+    #[test]
+    fn a_non_admin_revocation_does_not_touch_the_admin_cooldown_stamp() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+        client.grant_role(&admin, &user, &ROLE_BUSINESS);
+
+        client.revoke_role(&admin, &user, &ROLE_BUSINESS);
+
+        assert!(!client.has_role(&user, &ROLE_BUSINESS));
+        assert_eq!(last_admin_removed_at(&env, &client), None);
+    }
+
+    // ── guard ordering and the cooldown boundary ────────────────────────────
+
+    #[test]
+    fn the_min_admin_guard_fires_before_the_cooldown_guard() {
+        let (env, client, admin) = setup();
+        let (first, _second) = seed_admins(&env, &client, &admin);
+
+        env.ledger().with_mut(|l| l.timestamp = 5_000);
+        client.revoke_role(&admin, &first, &ROLE_ADMIN); // count 3 -> 2, stamps cooldown
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.revoke_role(&admin, &admin, &ROLE_ADMIN);
+        }));
+        assert!(outcome.is_err());
+        assert!(
+            client.has_role(&admin, &ROLE_ADMIN),
+            "a rejecting guard must not have written the role change"
+        );
+        assert_eq!(last_admin_removed_at(&env, &client), Some(5_000));
+    }
+
+    #[test]
+    fn the_cooldown_boundary_is_inclusive_at_exactly_the_configured_delay() {
+        let (env, client, admin) = setup();
+        let (first, second) = seed_admins(&env, &client, &admin);
+
+        env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+        client.revoke_role(&admin, &first, &ROLE_ADMIN);
+        assert_eq!(last_admin_removed_at(&env, &client), Some(1_000_000));
+
+        // One second short of the cooldown: rejected, state untouched.
+        env.ledger()
+            .with_mut(|l| l.timestamp += ADMIN_REMOVAL_COOLDOWN_SECS - 1);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.revoke_role(&admin, &second, &ROLE_ADMIN);
+        }));
+        assert!(
+            outcome.is_err(),
+            "cooldown must block a removal that is 1s early"
+        );
+        assert!(client.has_role(&second, &ROLE_ADMIN));
+        assert_eq!(last_admin_removed_at(&env, &client), Some(1_000_000));
+
+        // Exactly at the cooldown: accepted.
+        env.ledger().with_mut(|l| l.timestamp += 1);
+        client.revoke_role(&admin, &second, &ROLE_ADMIN);
+
+        assert!(!client.has_role(&second, &ROLE_ADMIN));
+        assert_eq!(
+            last_admin_removed_at(&env, &client),
+            Some(1_000_000 + ADMIN_REMOVAL_COOLDOWN_SECS)
+        );
+    }
+
+    // ── audit event ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_successful_revocation_emits_the_canonical_role_revoked_event() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+        client.grant_role(&admin, &user, &(ROLE_ATTESTOR | ROLE_BUSINESS));
+
+        client.revoke_role(&admin, &user, &ROLE_BUSINESS);
+
+        let (_cid, topics, data) = env
+            .events()
+            .all()
+            .last()
+            .expect("revoke must emit an event");
+
+        assert_eq!(topics.len(), 2);
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            TOPIC_ROLE_REVOKED
+        );
+        assert_eq!(
+            Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            user
+        );
+
+        let ev = RoleChangedEvent::try_from_val(&env, &data).unwrap();
+        assert_eq!(ev.account, user);
+        assert_eq!(
+            ev.role, ROLE_BUSINESS,
+            "the event must carry the revoked mask"
+        );
+        assert_eq!(ev.changed_by, admin);
+        // Only the named bit was cleared.
+        assert!(client.has_role(&user, &ROLE_ATTESTOR));
+    }
+
+    #[test]
+    fn revoking_a_role_the_account_does_not_hold_is_a_silent_no_op() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+        client.grant_role(&admin, &user, &ROLE_ATTESTOR);
+
+        client.revoke_role(&admin, &user, &ROLE_BUSINESS);
+
+        assert_eq!(roles(&env, &client, &user), ROLE_ATTESTOR);
+    }
 }

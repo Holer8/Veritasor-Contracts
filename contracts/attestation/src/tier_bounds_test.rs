@@ -94,6 +94,21 @@ fn test_set_business_tier_u32_max_panics() {
     t.client.set_business_tier(&biz, &u32::MAX);
 }
 
+#[test]
+fn test_rejected_business_tier_preserves_previous_value() {
+    let t = setup();
+    let biz = Address::generate(&t.env);
+    t.client.set_business_tier(&biz, &3);
+
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        t.client
+            .set_business_tier(&biz, &(dynamic_fees::MAX_TIER + 1));
+    }));
+
+    assert!(rejected.is_err());
+    assert_eq!(t.client.get_business_tier(&biz), 3);
+}
+
 // ── set_tier_discount bounds ────────────────────────────────────────
 
 #[test]
@@ -203,18 +218,22 @@ fn test_tier_min_zero_discount() {
     // 1. Unconfigured MIN_TIER discount must be 0 bps.
     let discount = dynamic_fees::get_tier_discount(&t.env, dynamic_fees::MIN_TIER);
     assert_eq!(
-        discount, 0,
+        discount,
+        0,
         "MIN_TIER (tier {}) discount must be 0, got {}",
-        dynamic_fees::MIN_TIER, discount
+        dynamic_fees::MIN_TIER,
+        discount
     );
 
     // 2. Explicitly setting MIN_TIER discount to 0 persists correctly.
     t.client.set_tier_discount(&dynamic_fees::MIN_TIER, &0);
     let discount = dynamic_fees::get_tier_discount(&t.env, dynamic_fees::MIN_TIER);
     assert_eq!(
-        discount, 0,
+        discount,
+        0,
         "MIN_TIER (tier {}) discount must be 0 after explicit set, got {}",
-        dynamic_fees::MIN_TIER, discount
+        dynamic_fees::MIN_TIER,
+        discount
     );
 
     // 3. compute_fee at MIN_TIER with zero volume discount must equal base_fee.

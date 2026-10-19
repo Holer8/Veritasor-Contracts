@@ -14,6 +14,10 @@
 //! | `bump_idempotent` | Multiple bumps on same pointer all succeed |
 //! | `bump_wrong_period` | Pointer for a different period returns false |
 //! | `bump_after_finalization` | Bumping a finalized epoch's pointer still works |
+//! | `bump_without_auth` | Unauthorized caller is rejected and mutates nothing |
+//! | `rejected_non_admin_bump` | A rejected bump leaves state unchanged |
+//! | `bump_scoped_per_business_and_period` | Bump is scoped to an exact (business, period) |
+//! | `bump_empty_period` | Empty period never has a pointer and returns false |
 //!
 //! ## Security Assumptions Validated
 //!
@@ -60,10 +64,7 @@ fn record(
 }
 
 /// Extract all `PointerTtlBumpedEvent` payloads from the event log for `contract_id`.
-fn bump_events(
-    env: &Env,
-    contract_id: &Address,
-) -> std::vec::Vec<PointerTtlBumpedEvent> {
+fn bump_events(env: &Env, contract_id: &Address) -> std::vec::Vec<PointerTtlBumpedEvent> {
     env.events()
         .all()
         .iter()
@@ -108,7 +109,10 @@ fn bump_nonexistent_pointer_returns_false() {
     assert!(!result, "expected false for non-existent pointer");
 
     let evts = bump_events(&env, &client.address);
-    assert!(evts.is_empty(), "no event should be emitted for absent pointer");
+    assert!(
+        evts.is_empty(),
+        "no event should be emitted for absent pointer"
+    );
 }
 
 /// Non-admin, non-writer callers must be rejected.
@@ -163,13 +167,15 @@ fn bump_idempotent_multiple_times() {
     let business = Address::generate(&env);
     record(&client, &env, &admin, &business, "2026-07");
 
+    // The host event buffer is scoped to a single invocation, so collect the
+    // events of each bump call individually and sum them.
+    let mut total_bump_events = 0;
     for _ in 0..3 {
         let result = client.bump_snapshot_pointer_ttl(&admin, &business, &p(&env, "2026-07"));
         assert!(result);
+        total_bump_events += bump_events(&env, &client.address).len();
     }
-
-    let evts = bump_events(&env, &client.address);
-    assert_eq!(evts.len(), 3, "each bump should emit its own event");
+    assert_eq!(total_bump_events, 3, "each bump should emit its own event");
 }
 
 /// Bumping a pointer for a period that was never written returns false.
@@ -182,7 +188,10 @@ fn bump_wrong_period_returns_false() {
 
     // Attempt bump for a different period on the same business.
     let result = client.bump_snapshot_pointer_ttl(&admin, &business, &p(&env, "2026-09"));
-    assert!(!result, "different period = no snapshot = should return false");
+    assert!(
+        !result,
+        "different period = no snapshot = should return false"
+    );
 }
 
 /// Bumping after epoch finalization still works (finalization does not seal TTL operations).
@@ -195,7 +204,10 @@ fn bump_after_epoch_finalization_succeeds() {
 
     // Finalized epochs must still allow TTL maintenance.
     let result = client.bump_snapshot_pointer_ttl(&admin, &business, &p(&env, "2026-10"));
-    assert!(result, "TTL bump must succeed even after epoch is finalized");
+    assert!(
+        result,
+        "TTL bump must succeed even after epoch is finalized"
+    );
 
     let evts = bump_events(&env, &client.address);
     assert_eq!(evts.len(), 1);
@@ -211,11 +223,89 @@ fn bump_multiple_businesses_same_epoch() {
     record(&client, &env, &admin, &b2, "2026-11");
 
     assert!(client.bump_snapshot_pointer_ttl(&admin, &b1, &p(&env, "2026-11")));
-    assert!(client.bump_snapshot_pointer_ttl(&admin, &b2, &p(&env, "2026-11")));
+    let evts1 = bump_events(&env, &client.address);
+    assert_eq!(evts1.len(), 1, "one event for the first bump");
+    assert_eq!(evts1[0].business, b1);
 
-    let evts = bump_events(&env, &client.address);
-    assert_eq!(evts.len(), 2, "one event per business bump");
-    // Each event references the correct business
-    assert_eq!(evts[0].business, b1);
-    assert_eq!(evts[1].business, b2);
+    assert!(client.bump_snapshot_pointer_ttl(&admin, &b2, &p(&env, "2026-11")));
+    let evts2 = bump_events(&env, &client.address);
+    assert_eq!(evts2.len(), 1, "one event for the second bump");
+    assert_eq!(evts2[0].business, b2);
+}
+
+/// An unauthorized caller (blanket auths cleared) is rejected and mutates nothing.
+#[test]
+fn bump_without_auth_is_rejected_and_leaves_state_unchanged() {
+    let (env, client, admin) = setup();
+    let business = Address::generate(&env);
+    record(&client, &env, &admin, &business, "2026-12");
+
+    // Remove the blanket mock so `require_auth` has nothing to satisfy it.
+    env.mock_auths(&[]);
+    let res = client.try_bump_snapshot_pointer_ttl(&admin, &business, &p(&env, "2026-12"));
+    assert!(res.is_err(), "unauthorized bump must be rejected");
+
+    // The rejection emitted no event ...
+    assert!(
+        bump_events(&env, &client.address).is_empty(),
+        "rejected bump must not emit a PointerTtlBumped event"
+    );
+
+    // ... and left the pointer intact for a later authorized bump.
+    env.mock_all_auths();
+    assert!(client.bump_snapshot_pointer_ttl(&admin, &business, &p(&env, "2026-12")));
+    assert_eq!(bump_events(&env, &client.address).len(), 1);
+}
+
+/// A rejected non-admin bump leaves all state unchanged.
+#[test]
+fn rejected_non_admin_bump_leaves_state_unchanged() {
+    let (env, client, admin) = setup();
+    let business = Address::generate(&env);
+    record(&client, &env, &admin, &business, "2027-01");
+
+    let intruder = Address::generate(&env);
+    let res = client.try_bump_snapshot_pointer_ttl(&intruder, &business, &p(&env, "2027-01"));
+    assert!(res.is_err(), "non-admin caller must be rejected");
+    assert!(
+        bump_events(&env, &client.address).is_empty(),
+        "rejected bump must not emit a PointerTtlBumped event"
+    );
+
+    // The pointer is still bumpable by an authorized caller afterwards.
+    assert!(client.bump_snapshot_pointer_ttl(&admin, &business, &p(&env, "2027-01")));
+    assert_eq!(bump_events(&env, &client.address).len(), 1);
+}
+
+/// The bump is scoped to the exact (business, period) pointer.
+#[test]
+fn bump_is_scoped_per_business_and_period() {
+    let (env, client, admin) = setup();
+    let business_a = Address::generate(&env);
+    let business_b = Address::generate(&env);
+    record(&client, &env, &admin, &business_a, "2027-02");
+
+    assert!(
+        client.bump_snapshot_pointer_ttl(&admin, &business_a, &p(&env, "2027-02")),
+        "the recorded pointer must bump"
+    );
+    assert!(
+        !client.bump_snapshot_pointer_ttl(&admin, &business_a, &p(&env, "2027-03")),
+        "a different period for the same business has no pointer"
+    );
+    assert!(
+        !client.bump_snapshot_pointer_ttl(&admin, &business_b, &p(&env, "2027-02")),
+        "a different business for the same period has no pointer"
+    );
+}
+
+/// An empty period can never resolve to a pointer and returns false.
+#[test]
+fn bump_empty_period_returns_false() {
+    let (env, client, admin) = setup();
+    let business = Address::generate(&env);
+
+    let result = client.bump_snapshot_pointer_ttl(&admin, &business, &p(&env, ""));
+    assert!(!result, "empty period must not bump");
+    assert!(bump_events(&env, &client.address).is_empty());
 }

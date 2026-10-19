@@ -1,11 +1,11 @@
 #![cfg(test)]
 extern crate std;
 
+use super::*;
 use crate::access_control::{ROLE_ATTESTOR, ROLE_BUSINESS};
 use crate::dispute::{DisputeOutcome, DisputeType};
-use soroban_sdk::testutils::{Address as _, Ledger, Events};
+use soroban_sdk::testutils::{Address as _, Events, Ledger};
 use soroban_sdk::{Address, BytesN, Env, String};
-use super::*;
 
 fn setup() -> (Env, AttestationContractClient<'static>, Address, Address) {
     let env = Env::default();
@@ -299,4 +299,19 @@ fn test_double_unlock_is_safe() {
 
         assert!(!dispute::is_attestor_locked(&env, &attestor));
     });
+}
+
+#[test]
+fn test_unlock_empty_state_returns_fully_unlocked() {
+    let (env, _client, _admin, contract_id) = setup();
+    let attestor = Address::generate(&env);
+
+    let fully_unlocked = with_contract(&env, &contract_id, || {
+        dispute::unlock_attestor(&env, &attestor)
+    });
+
+    assert!(fully_unlocked);
+    assert!(!with_contract(&env, &contract_id, || {
+        dispute::is_attestor_locked(&env, &attestor)
+    }));
 }

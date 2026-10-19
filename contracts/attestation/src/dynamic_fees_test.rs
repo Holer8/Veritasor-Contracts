@@ -9,7 +9,7 @@ extern crate std;
 
 use super::*;
 
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{vec, Address, BytesN, Env, String};
 
@@ -285,8 +285,16 @@ fn test_volume_bracket_exact_boundary() {
             submitted += 1;
         }
         assert_eq!(t.client.get_business_count(&business), target_count);
-        assert_eq!(t.client.get_volume_discount(&business), expected_bps, "Failed at count {}", target_count);
-        assert_eq!(t.client.get_fee_quote(&business), compute_fee(1_000_000, 0, expected_bps));
+        assert_eq!(
+            t.client.get_volume_discount(&business),
+            expected_bps,
+            "Failed at count {}",
+            target_count
+        );
+        assert_eq!(
+            t.client.get_fee_quote(&business),
+            compute_fee(1_000_000, 0, expected_bps)
+        );
     }
 }
 
@@ -852,7 +860,6 @@ fn test_volume_brackets_descending_thresholds_rejected() {
     t.client.set_volume_brackets(&thresholds, &discounts);
 }
 
-
 // ════════════════════════════════════════════════════════════════════
 //  Single-bracket volume edge cases
 // ════════════════════════════════════════════════════════════════════
@@ -972,31 +979,54 @@ fn test_single_bracket_threshold_zero_matches_any_volume() {
 
 #[test]
 fn discount_stacking_no_underflow() {
-    let e = soroban_sdk::Env::default();
-    let contract = AttestationContract::new(&e);
+    assert_eq!(compute_fee(1_000, 10_000, 10_000), 0);
+    assert_eq!(compute_fee(500, 10_000, 10_000), 0);
+    assert_eq!(compute_fee(10_000, 9_900, 9_900), 1);
 
-    contract.set_fee_on(&true);
-    contract.set_base_fee(&1000i128);
+    // The fee never exceeds the base fee.
+    assert_eq!(compute_fee(10_000i128, 0, 0), 10_000i128);
+    assert!(compute_fee(10_000i128, 5_000, 5_000) <= 10_000i128);
+}
 
-    contract.set_business_tier(&soroban_sdk::Address::generate(&e), &0u32);
-    contract.set_tier_discount(&0u32, &10_000u32);
+#[test]
+fn test_get_volume_discounts_vec_empty() {
+    let test = setup_with_fees(0);
+    let (thresholds, discounts) = test.client.get_volume_brackets();
+    assert_eq!(thresholds.len(), 0);
+    assert_eq!(discounts.len(), 0);
+}
 
-    contract.set_volume_thresholds(&vec![&e, 1u64]);
-    contract.set_volume_discounts(&vec![&e, 10_000u32]);
-    contract.mock_business_count(&soroban_sdk::Address::generate(&e), &2u64);
+#[test]
+fn test_get_volume_discounts_vec_valid_values() {
+    let test = setup_with_fees(0);
+    let thresholds = vec![&test.env, 10u64, 50u64];
+    let discounts = vec![&test.env, 500u32, 1_000u32];
+    test.client.set_volume_brackets(&thresholds, &discounts);
+    let (actual_thresholds, actual_discounts) = test.client.get_volume_brackets();
+    assert_eq!(actual_thresholds, thresholds);
+    assert_eq!(actual_discounts, discounts);
+}
 
-    let fee = contract.compute_fee(&1000i128, &0u32, &2u64);
-    assert!(fee >= 0, "Fee must not underflow with max stacked discounts");
-    assert_eq!(fee, 0i128, "With 100% tier + 100% volume discount, fee should be 0");
+#[test]
+fn test_get_volume_discounts_vec_state_unchanged() {
+    let test = setup_with_fees(0);
+    let thresholds = vec![&test.env, 20u64, 40u64];
+    let discounts = vec![&test.env, 100u32, 200u32];
+    test.client.set_volume_brackets(&thresholds, &discounts);
+    let before = test.client.get_volume_brackets();
+    let after = test.client.get_volume_brackets();
+    assert_eq!(before, after);
+    assert_eq!(after.0, thresholds);
+    assert_eq!(after.1, discounts);
+}
 
-    let fee2 = contract.compute_fee(&500i128, &0u32, &2u64);
-    assert!(fee2 >= 0, "Fee must remain non-negative under all discount scenarios");
-    assert_eq!(fee2, 0i128);
-
-    contract.set_tier_discount(&0u32, &9_900u32);
-    contract.set_volume_discounts(&vec![&e, 9_900u32]);
-    let fee3 = contract.compute_fee(&10_000i128, &0u32, &2u64);
-    assert!(fee3 >= 0 && fee3 <= 10_000i128,
-        "Fee with near-max discounts should be between 0 and base_fee, got {}", fee3);
-    assert_eq!(fee3, 1i128);
+#[test]
+fn test_get_volume_discounts_vec_boundary_values() {
+    let test = setup_with_fees(0);
+    let thresholds = vec![&test.env, 1u64];
+    let discounts = vec![&test.env, 10_000u32];
+    test.client.set_volume_brackets(&thresholds, &discounts);
+    let (actual_thresholds, actual_discounts) = test.client.get_volume_brackets();
+    assert_eq!(actual_thresholds, thresholds);
+    assert_eq!(actual_discounts, discounts);
 }
